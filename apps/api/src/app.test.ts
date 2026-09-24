@@ -2192,7 +2192,32 @@ describe("OU-Image API", () => {
     );
   });
 
-  it("stores, serves and deletes images on an active remote provider", async () => {
+  it.each([
+    {
+      provider: "r2" as const,
+      config: {
+        endpoint: "https://account.r2.cloudflarestorage.com",
+        bucket: "images",
+        accessKeyId: "access-key",
+        secretAccessKey: "remote-secret",
+        pathStyle: true
+      }
+    },
+    {
+      provider: "s3" as const,
+      config: {
+        endpoint: "https://s3.us-east-1.amazonaws.com",
+        bucket: "images",
+        region: "us-east-1",
+        accessKeyId: "access-key",
+        secretAccessKey: "remote-secret",
+        pathStyle: true
+      }
+    }
+  ])("stores, serves and deletes images on active $provider storage", async ({
+    provider,
+    config
+  }) => {
     process.env.OU_SECRET_KEY = "remote-active-master-key";
     const store = new AppStore(null);
     let dataDirectory = "";
@@ -2240,21 +2265,10 @@ describe("OU-Image API", () => {
       method: "PATCH",
       url: "/storage/settings",
       cookies,
-      payload: {
-        storage: {
-          active: "r2",
-          r2: {
-            endpoint: "https://account.r2.cloudflarestorage.com",
-            bucket: "images",
-            accessKeyId: "access-key",
-            secretAccessKey: "remote-secret",
-            pathStyle: true
-          }
-        }
-      }
+      payload: { storage: { active: provider, [provider]: config } }
     });
     expect(activated.statusCode).toBe(200);
-    expect(activated.json().storage.active).toBe("r2");
+    expect(activated.json().storage.active).toBe(provider);
     expect(requests[0]).toMatchObject({ method: "HEAD", path: "/images" });
 
     const png = await sharp({
@@ -2294,6 +2308,31 @@ describe("OU-Image API", () => {
     });
     expect(original.statusCode).toBe(200);
     expect(original.rawPayload).toEqual(png);
+
+    const localAgain = await app.inject({
+      method: "PATCH",
+      url: "/storage/settings",
+      cookies,
+      payload: { storage: { active: "local" } }
+    });
+    expect(localAgain.json().storage.active).toBe("local");
+    const summary = await app.inject({
+      method: "GET",
+      url: "/uploads/summary",
+      cookies
+    });
+    expect(summary.json().storageProvider).toBe("local");
+    const remoteAfterSwitch = await app.inject({
+      method: "GET",
+      url: `/files/${imageId}/thumbnail`
+    });
+    expect(remoteAfterSwitch.statusCode).toBe(200);
+    await app.inject({
+      method: "PATCH",
+      url: "/storage/settings",
+      cookies,
+      payload: { storage: { active: provider } }
+    });
 
     await app.inject({
       method: "POST",

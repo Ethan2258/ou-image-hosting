@@ -13,14 +13,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/cshaizhihao/ou-image-hosting/releases/latest">
+  <a href="https://github.com/Ethan2258/ou-image-hosting/releases/latest">
     <img src="https://img.shields.io/badge/version-v1.0.0-ef8f8f?style=flat-square" alt="Current version v1.0.0" />
   </a>
-  <a href="https://github.com/cshaizhihao/ou-image-hosting/actions/workflows/check.yml">
-    <img src="https://img.shields.io/github/actions/workflow/status/cshaizhihao/ou-image-hosting/check.yml?branch=main&style=flat-square&label=check" alt="Check" />
+  <a href="https://github.com/Ethan2258/ou-image-hosting/actions/workflows/check.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/Ethan2258/ou-image-hosting/check.yml?branch=main&style=flat-square&label=check" alt="Check" />
   </a>
-  <a href="https://github.com/cshaizhihao/ou-image-hosting/actions/workflows/docker.yml">
-    <img src="https://img.shields.io/github/actions/workflow/status/cshaizhihao/ou-image-hosting/docker.yml?branch=main&style=flat-square&label=docker" alt="Docker" />
+  <a href="https://github.com/Ethan2258/ou-image-hosting/actions/workflows/docker.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/Ethan2258/ou-image-hosting/docker.yml?branch=main&style=flat-square&label=docker" alt="Docker" />
   </a>
   <img src="https://img.shields.io/badge/Next.js-15-111111?style=flat-square" alt="Next.js 15" />
   <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT License" />
@@ -38,10 +38,15 @@
   <a href="./docs/deployment.md">部署文档</a>
 </p>
 
+> [!NOTE]
+> 本仓库是 [cshaizhihao/ou-image-hosting](https://github.com/cshaizhihao/ou-image-hosting) 的分支版本：
+> 本地存储、Amazon S3、Cloudflare R2 都可以设为当前存储，站内提示会跟随所选存储方式。
+> 每天自动同步上游更新，代码变更后自动发布 Release 与 Docker 镜像。
+
 ## 🚀 快速开始
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cshaizhihao/ou-image-hosting/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Ethan2258/ou-image-hosting/main/install.sh | bash
 ```
 
 安装器会自动处理依赖、配置、反向代理和服务启动。完成后，打开提示里的访问地址，创建第一个管理员账号就能用。
@@ -51,7 +56,7 @@ Cloudflare 小黄云用户建议提前确认：DNS 已指向服务器 IP，SSL/T
 无人值守安装示例：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cshaizhihao/ou-image-hosting/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/Ethan2258/ou-image-hosting/main/install.sh \
   | bash -s -- --yes --origin https://img.example.com --proxy cloudflare --port 3080
 ```
 

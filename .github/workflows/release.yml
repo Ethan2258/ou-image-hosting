@@ -1,0 +1,170 @@
+name: Release
+
+# Publishes v<VERSION>-r2.<n> releases of this fork: each code change on main
+# (pushed directly, or merged from upstream by sync-upstream.yml) gets the
+# next build number for the current upstream VERSION.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - apps/**
+      - packages/**
+      - scripts/**
+      - Dockerfile
+      - docker-compose.yml
+      - install.sh
+      - package.json
+      - pnpm-lock.yaml
+      - VERSION
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CI: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.2
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.9 --activate
+          pnpm config set child-concurrency 1
+          pnpm config set network-concurrency 4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run checks
+        run: pnpm check
+
+  release:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Choose release tag
+        id: tag
+        run: |
+          base="$(head -n 1 VERSION | tr -d '[:space:]')"
+          existing="$(git tag --points-at HEAD --list "v${base}-r2.*" | head -n 1)"
+          if [[ -n "$existing" ]]; then
+            echo "HEAD is already released as ${existing}; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last="$(git tag --list "v${base}-r2.*" | sed "s/^v${base}-r2\.//" | sort -n | tail -n 1)"
+          previous="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+          tag="v${base}-r2.$(( ${last:-0} + 1 ))"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "previous=${previous}" >> "$GITHUB_OUTPUT"
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        if: steps.tag.outputs.skip == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: steps.tag.outputs.skip == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push API image
+        if: steps.tag.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: api
+          push: true
+          tags: |
+            ghcr.io/${{ steps.tag.outputs.owner }}/ou-image-hosting-api:${{ steps.tag.outputs.tag }}
+            ghcr.io/${{ steps.tag.outputs.owner }}/ou-image-hosting-api:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=ou-image-hosting
+          cache-to: type=gha,mode=max,scope=ou-image-hosting
+
+      - name: Build and push Web image
+        if: steps.tag.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: web
+          push: true
+          tags: |
+            ghcr.io/${{ steps.tag.outputs.owner }}/ou-image-hosting-web:${{ steps.tag.outputs.tag }}
+            ghcr.io/${{ steps.tag.outputs.owner }}/ou-image-hosting-web:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=ou-image-hosting
+          cache-to: type=gha,mode=max,scope=ou-image-hosting
+
+      - name: Publish GitHub release
+        if: steps.tag.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          PREVIOUS: ${{ steps.tag.outputs.previous }}
+          OWNER: ${{ steps.tag.outputs.owner }}
+        run: |
+          range="${PREVIOUS:+${PREVIOUS}..}HEAD"
+          {
+            echo "# OU-Image Hosting ${TAG}"
+            echo
+            echo "基于上游 \`$(head -n 1 VERSION)\`，包含本地存储 / Amazon S3 / Cloudflare R2 三种主存储支持。"
+            echo
+            echo "## 更新内容"
+            echo
+            git log --no-merges --pretty='- %s (%h)' "$range" | head -n 100
+            echo
+            echo "## Docker 镜像"
+            echo
+            echo '```text'
+            echo "ghcr.io/${OWNER}/ou-image-hosting-api:${TAG}"
+            echo "ghcr.io/${OWNER}/ou-image-hosting-web:${TAG}"
+            echo '```'
+            echo
+            echo "## 升级"
+            echo
+            echo '```bash'
+            echo 'ouih update'
+            echo '```'
+          } > release-notes.md
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "OU-Image Hosting ${TAG}" \
+            --notes-file release-notes.md \
+            --latest

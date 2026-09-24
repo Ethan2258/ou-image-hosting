@@ -1039,7 +1039,7 @@ export function StorageConsole() {
             <span className={styles.liveDot} />
             <div>
               <strong>{providerMeta[actualActive].label}</strong>
-              <small>当前主存储运行中</small>
+              <small>当前存储运行中</small>
             </div>
           </div>
         </header>
@@ -1651,7 +1651,8 @@ export function StorageConsole() {
                 <small>校验后复制</small>
               </div>
               <p>
-                迁移期间上传不受影响。当前版本继续使用本地存储作为写入源。
+                迁移期间上传不受影响，新图片继续写入当前存储：
+                {providerMeta[actualActive].label}。
               </p>
             </div>
             <div className={styles.listCard}>

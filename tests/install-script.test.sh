@@ -32,7 +32,7 @@ fi
 if [[ "${1:-}" == "-C" ]]; then
   shift 2
   if [[ "${1:-}" == "remote" && "${2:-}" == "get-url" ]]; then
-    printf '%s\n' "https://github.com/cshaizhihao/ou-image-hosting.git"
+    printf '%s\n' "https://github.com/Ethan2258/ou-image-hosting.git"
   fi
   exit 0
 fi

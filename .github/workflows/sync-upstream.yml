@@ -1,0 +1,86 @@
+name: Sync upstream
+
+# Merges cshaizhihao/ou-image-hosting main into this fork and starts a
+# release when anything new came in. When the merge conflicts, or it touches
+# workflow files the default token may not push, a pull request from upstream
+# is opened instead and the run fails so the owner gets notified.
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: cshaizhihao/ou-image-hosting
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Merge upstream main
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          upstream_sha="$(git rev-parse --short upstream/main)"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already contains upstream ${upstream_sha}."
+            echo "result=up-to-date" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge --no-edit -m "chore: merge upstream ${upstream_sha}" upstream/main; then
+            {
+              echo "### 上游合并冲突"
+              echo
+              git diff --name-only --diff-filter=U | sed 's/^/- /'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git push origin HEAD:main; then
+            echo "Merged upstream ${upstream_sha}." >> "$GITHUB_STEP_SUMMARY"
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+          else
+            echo "推送被拒绝（上游修改了工作流文件时需要带 workflow 权限的 SYNC_TOKEN）。" >> "$GITHUB_STEP_SUMMARY"
+            echo "result=push-rejected" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Start release
+        if: steps.merge.outputs.result == 'merged'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref main
+
+      - name: Open pull request from upstream
+        if: steps.merge.outputs.result == 'conflict' || steps.merge.outputs.result == 'push-rejected'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head="${UPSTREAM_REPOSITORY%%/*}:main"
+          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --base main --head main --json number,headRepositoryOwner --jq ".[] | select(.headRepositoryOwner.login == \"${UPSTREAM_REPOSITORY%%/*}\") | .number" | head -n 1)"
+          if [[ -z "$existing" ]]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$head" \
+              --title "同步上游更新" \
+              --body "自动同步未能直接合并上游 ${UPSTREAM_REPOSITORY} 的 main（${{ steps.merge.outputs.result }}），请在此处理后合并。"
+          fi
+          echo "需要手动处理上游同步，见 Pull Request。" >> "$GITHUB_STEP_SUMMARY"
+          exit 1

@@ -2,7 +2,8 @@
 
 set -Eeuo pipefail
 
-REPOSITORY_URL="https://github.com/cshaizhihao/ou-image-hosting.git"
+REPOSITORY_URL="https://github.com/Ethan2258/ou-image-hosting.git"
+UPSTREAM_REPOSITORY_URL="https://github.com/cshaizhihao/ou-image-hosting.git"
 DEFAULT_INSTALL_DIR="${HOME:-/opt}/ou-image-hosting"
 DEFAULT_BIND_HOST="127.0.0.1"
 DEFAULT_PORT="3000"
@@ -88,10 +89,10 @@ OU-Image Hosting 交互式安装程序
   -h, --help            显示帮助
 
 一键交互安装：
-  curl -fsSL https://raw.githubusercontent.com/cshaizhihao/ou-image-hosting/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/Ethan2258/ou-image-hosting/main/install.sh | bash
 
 无人值守本机安装：
-  curl -fsSL https://raw.githubusercontent.com/cshaizhihao/ou-image-hosting/main/install.sh \
+  curl -fsSL https://raw.githubusercontent.com/Ethan2258/ou-image-hosting/main/install.sh \
     | bash -s -- --yes
 EOF
 }
@@ -609,6 +610,8 @@ prepare_source() {
     local remote_url
     remote_url="$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)"
     [[ "$remote_url" == "$REPOSITORY_URL" ||
+       "$remote_url" == "git@github.com:Ethan2258/ou-image-hosting.git" ||
+       "$remote_url" == "$UPSTREAM_REPOSITORY_URL" ||
        "$remote_url" == "git@github.com:cshaizhihao/ou-image-hosting.git" ]] ||
       fatal "安装目录中的 Git 仓库不是 OU-Image Hosting。"
     [[ -z "$(git -C "$INSTALL_DIR" status --porcelain)" ]] ||

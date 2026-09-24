@@ -930,16 +930,16 @@ export async function registerUploadRoutes(
   app.get("/uploads/summary", async (request) => {
     const principal = authenticate(request);
     requireCapability(principal, "read", ["analytics:read"]);
-    const images = store
-      .snapshot()
-      .images.filter(
+    const state = store.snapshot();
+    const images = state.images.filter(
         (image) =>
           image.workspaceId === principal.workspaceId && !image.publicUploadGuest
       );
     return {
       count: images.filter((image) => !image.deletedAt).length,
       bytes: calculateImageStorageBytes(images),
-      quotaBytes
+      quotaBytes,
+      storageProvider: state.storageSettings.active
     };
   });
 
