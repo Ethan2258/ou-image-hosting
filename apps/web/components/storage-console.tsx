@@ -780,13 +780,16 @@ export function StorageConsole() {
     }));
   };
 
-  const saveSettings = async (scope: "storage" | "delivery" | "backup") => {
+  const saveSettings = async (
+    scope: "storage" | "delivery" | "backup",
+    active: ProviderKey = settings.storage.active
+  ) => {
     setBusy(`save-${scope}`);
     setNotice("");
     setError("");
     try {
       const storagePayload = {
-        active: "local" as const,
+        active,
         ...(hasRemoteConfiguration(settings.storage.s3, secrets.s3)
           ? { s3: remotePayload(settings.storage.s3, secrets.s3) }
           : {}),
@@ -813,7 +816,9 @@ export function StorageConsole() {
       setSecrets({ s3: "", r2: "" });
       setNotice(
         scope === "storage"
-          ? "存储提供商配置已保存"
+          ? active !== settings.storage.active
+            ? `已切换到${providerMeta[active].label}，新上传的图片将存放在这里`
+            : "存储提供商配置已保存"
           : scope === "delivery"
             ? "域名与访问策略已保存"
             : "备份计划已保存"
@@ -1213,19 +1218,37 @@ export function StorageConsole() {
                   <span>当前编辑</span>
                   <h3>{providerMeta[selectedProvider].label}</h3>
                 </div>
-                <Button
-                  disabled={busy === `test-${selectedProvider}`}
-                  onClick={() => void testProvider(selectedProvider)}
-                  size="compact"
-                  variant="secondary"
-                >
-                  {busy === `test-${selectedProvider}` ? (
-                    <LoaderCircle className={styles.spin} size={15} />
-                  ) : (
-                    <RefreshCw aria-hidden="true" size={15} />
+                <div className={styles.configActions}>
+                  <Button
+                    disabled={busy === `test-${selectedProvider}`}
+                    onClick={() => void testProvider(selectedProvider)}
+                    size="compact"
+                    variant="secondary"
+                  >
+                    {busy === `test-${selectedProvider}` ? (
+                      <LoaderCircle className={styles.spin} size={15} />
+                    ) : (
+                      <RefreshCw aria-hidden="true" size={15} />
+                    )}
+                    测试连接
+                  </Button>
+                  {selectedProvider !== actualActive && (
+                    <Button
+                      disabled={busy === "save-storage"}
+                      onClick={() =>
+                        void saveSettings("storage", selectedProvider)
+                      }
+                      size="compact"
+                    >
+                      {busy === "save-storage" ? (
+                        <LoaderCircle className={styles.spin} size={15} />
+                      ) : (
+                        <ShieldCheck aria-hidden="true" size={15} />
+                      )}
+                      设为当前存储
+                    </Button>
                   )}
-                  测试连接
-                </Button>
+                </div>
               </div>
 
               {selectedProvider === "local" ? (
