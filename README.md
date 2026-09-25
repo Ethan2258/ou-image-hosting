@@ -137,6 +137,6 @@ ouih doctor
 - [v1.0.0 发布说明](./docs/releases/v1.0.0.md)
 
 ## 🤍 License
-MIT License。
+MIT License。上游 [cshaizhihao/ou-image-hosting](https://github.com/cshaizhihao/ou-image-hosting) 的版权声明保留在 [LICENSE](./LICENSE) 中，本分支的改动同样以 MIT 发布。
 
 如果它刚好让你的图片小屋舒服了一点，那就很好。
