@@ -84,3 +84,12 @@ jobs:
           fi
           echo "需要手动处理上游同步，见 Pull Request。" >> "$GITHUB_STEP_SUMMARY"
           exit 1
+
+      # GitHub disables scheduled workflows after 60 days without repository
+      # activity, and upstream can stay quiet for months. Re-enabling this
+      # workflow on every run resets that timer so syncing never stops silently.
+      - name: Keep the schedule alive
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/sync-upstream.yml/enable"
