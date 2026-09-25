@@ -27,6 +27,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  # Released images run on Node 24 LTS instead of the upstream Dockerfile's Node 20 default.
+  NODE_VERSION: 24.21.0
+
 jobs:
   verify:
     runs-on: ubuntu-24.04
@@ -36,12 +40,12 @@ jobs:
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 20.19.2
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Enable pnpm
         run: |
@@ -62,7 +66,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -103,6 +107,7 @@ jobs:
           context: .
           file: Dockerfile
           target: api
+          build-args: NODE_VERSION=${{ env.NODE_VERSION }}
           push: true
           tags: |
             ghcr.io/${{ steps.tag.outputs.owner }}/ou-image-hosting-api:${{ steps.tag.outputs.tag }}
@@ -121,6 +126,7 @@ jobs:
           context: .
           file: Dockerfile
           target: web
+          build-args: NODE_VERSION=${{ env.NODE_VERSION }}
           push: true
           tags: |
             ghcr.io/${{ steps.tag.outputs.owner }}/ou-image-hosting-web:${{ steps.tag.outputs.tag }}
