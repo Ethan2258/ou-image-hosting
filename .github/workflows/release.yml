@@ -11,11 +11,16 @@ on:
       - apps/**
       - packages/**
       - scripts/**
+      - .dockerignore
+      - .npmrc
+      - Caddyfile
       - Dockerfile
       - docker-compose.yml
       - install.sh
       - package.json
       - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - tsconfig.base.json
       - VERSION
   workflow_dispatch:
 
