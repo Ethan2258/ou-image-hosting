@@ -74,9 +74,12 @@ COMPOSE_PARALLEL_LIMIT=1 docker compose --env-file .env.production build api
 COMPOSE_PARALLEL_LIMIT=1 docker compose --env-file .env.production build web
 ```
 
-Local builds pin Node.js 20.19.2 and pnpm 9.15.9, install with the frozen
-lockfile, and run as the unprivileged `node` user. The images published to GHCR
-by this fork's release workflow are built with `NODE_VERSION=24.21.0`.
+Local builds use Node.js 24.21.0 LTS (set in `docker-compose.yml`; the
+upstream Dockerfile still defaults to Node 20, which is end of life) and pnpm
+9.15.9, install with the frozen lockfile, and run as the unprivileged `node`
+user. The images published to GHCR by this fork's release workflow use the same
+`NODE_VERSION=24.21.0`. To build on another Node version, set `OU_NODE_VERSION`
+in `.env.production`, for example `OU_NODE_VERSION=20.20.2`.
 
 On CPU-limited hosts, prefer images built by CI. `nice` does not reliably limit
 the Docker daemon, and a local Next.js/Sharp build may temporarily exceed a

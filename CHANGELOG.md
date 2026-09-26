@@ -19,6 +19,8 @@
 ### Security
 
 - 升级 Next.js 至 15.5.26（修复未授权远程代码执行等漏洞）、Fastify 至 5.12.5、Sharp 至 0.35.4，并通过 pnpm overrides 修复 postcss、nanoid、fast-uri、find-my-way 的已知漏洞；`pnpm audit --prod` 无已知漏洞。
+- 服务器本地构建（`install.sh` / `ouih update`）的镜像改用 Node.js 24.21.0 LTS，不再使用已停止维护的 Node.js 20；可用 `.env.production` 中的 `OU_NODE_VERSION` 覆盖。
+- HTTPS 入口 Caddy 升级至 2.11.4，包含 2.11.x 系列的多项安全修复。
 
 ### Fixed
 

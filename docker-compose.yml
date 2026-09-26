@@ -21,6 +21,9 @@ services:
       context: .
       dockerfile: Dockerfile
       target: api
+      args:
+        # Node 20 reached end of life; builds on this fork follow Node 24 LTS.
+        NODE_VERSION: ${OU_NODE_VERSION:-24.21.0}
     image: ou-image-hosting-api:${OU_IMAGE_TAG:-local}
     env_file:
       - ${OU_ENV_FILE:-.env.production}
@@ -63,6 +66,9 @@ services:
       context: .
       dockerfile: Dockerfile
       target: web
+      args:
+        # Node 20 reached end of life; builds on this fork follow Node 24 LTS.
+        NODE_VERSION: ${OU_NODE_VERSION:-24.21.0}
     image: ou-image-hosting-web:${OU_IMAGE_TAG:-local}
     env_file:
       - ${OU_ENV_FILE:-.env.production}
@@ -102,7 +108,7 @@ services:
     <<: *runtime-defaults
     profiles:
       - https
-    image: caddy:2.10.2-alpine
+    image: caddy:2.11.4-alpine
     env_file:
       - ${OU_ENV_FILE:-.env.production}
     depends_on:
