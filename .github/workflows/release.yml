@@ -34,7 +34,7 @@ concurrency:
 
 env:
   # Released images run on Node 24 LTS instead of the upstream Dockerfile's Node 20 default.
-  NODE_VERSION: 24.21.0
+  NODE_VERSION: 24.22.1
 
 jobs:
   verify:
