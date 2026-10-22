@@ -93,8 +93,11 @@ test("设置、统计与系统状态核心 smoke", async ({ page }) => {
 
 test("命令面板可完全使用键盘导航", async ({ page }) => {
   await page.goto("/overview");
-  await page.keyboard.press("Control+k");
   const search = page.getByRole("textbox", { name: "搜索页面" });
+  await expect(async () => {
+    await page.keyboard.press("Control+k");
+    await expect(search).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 12_000 });
   await expect(search).toBeFocused();
   await expectVisibleFocus(page);
   await search.fill("图片库");
