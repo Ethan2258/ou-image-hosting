@@ -247,7 +247,6 @@ function WorkspaceSwitcher({
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
         <button
-          aria-label="切换工作区"
           className={cn("workspace-switcher", compact && "workspace-switcher--mobile")}
           type="button"
         >
@@ -261,6 +260,7 @@ function WorkspaceSwitcher({
             </small>
           </span>
           <ChevronDown aria-hidden="true" size={16} />
+          <span className="sr-only">切换工作区</span>
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
