@@ -803,7 +803,9 @@ export function AppShell({
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
-                  aria-label="打开用户菜单"
+                  aria-label={`打开用户菜单 ${(sessionUser?.displayName ?? "OU")
+                    .slice(0, 2)
+                    .toUpperCase()}`}
                   className="user-trigger"
                   type="button"
                 >
