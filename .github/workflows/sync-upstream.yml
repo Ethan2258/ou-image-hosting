@@ -72,7 +72,9 @@ jobs:
         if: steps.merge.outputs.result == 'merged'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run release.yml --ref main
+        # The checkout has an upstream remote, which gh prefers as its default
+        # repository, so the target must be named explicitly.
+        run: gh workflow run release.yml --ref main --repo "$GITHUB_REPOSITORY"
 
       - name: Report a manual merge
         if: steps.merge.outputs.result == 'conflict' || steps.merge.outputs.result == 'push-rejected'
