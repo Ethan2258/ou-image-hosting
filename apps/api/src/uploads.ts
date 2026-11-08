@@ -12,7 +12,7 @@ import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
 import path from "node:path";
 import heicConvert from "heic-convert";
-import sharp from "sharp";
+import sharp, { type Metadata } from "sharp";
 import {
   assertDeliveryAccess,
   buildDeliveryUrl,
@@ -26,7 +26,6 @@ import {
 } from "./access.js";
 import { backofficeAccessFor } from "./site-access.js";
 import { PublicError } from "./errors.js";
-import { createObjectStorage } from "./object-storage.js";
 import {
   hashOpaqueToken,
   signOpaquePayload,
@@ -34,6 +33,8 @@ import {
 } from "./security.js";
 import { registerImageDetailRoutes } from "./image-details.js";
 import { registerOrganizationRoutes } from "./organization.js";
+import { inspectLivePhotoVideo } from "./media-files.js";
+import type { MediaStorage } from "./media-storage.js";
 import {
   calculateImageStorageBytes,
   defaultWorkspaceSettings,
@@ -98,11 +99,9 @@ const livePhotoVideoMimeTypes = new Set([
   "application/octet-stream"
 ]);
 
-type SharpMetadata = Awaited<ReturnType<ReturnType<typeof sharp>["metadata"]>>;
-
 type UploadRouteOptions = {
+  media: MediaStorage;
   store: AppStore;
-  dataDirectory: string;
   now: () => Date;
   authenticate: (request: FastifyRequest) => Principal;
 };
@@ -122,6 +121,8 @@ function workspaceDate(timestamp: Date, timezone: string) {
 type UrlUploadBody = { url: string };
 type UploadQuery = {
   q?: string;
+  albumId?: string;
+  excludeAlbumId?: string;
   format?: "all" | StoredImage["format"];
   page?: string;
   limit?: string;
@@ -274,7 +275,9 @@ function publicImageCard(
         : total,
     0
   );
-  const uploader = state.users.find((user) => user.id === image.userId);
+  const uploaderName = image.publicUploadGuest
+    ? "匿名访客"
+    : state.users.find((user) => user.id === image.userId)?.displayName ?? "OU 用户";
   return {
     id: image.id,
     name: state.site?.publicGalleryShowFileName ? image.name : undefined,
@@ -284,8 +287,9 @@ function publicImageCard(
     width: image.width,
     height: image.height,
     shareViews,
-    uploaderName: state.site?.publicGalleryShowUploader
-      ? uploader?.displayName ?? "OU 用户"
+    uploaderName: state.site?.publicGalleryShowUploader ? uploaderName : undefined,
+    liveVideoUrl: image.livePhotoVideoKey
+      ? buildDeliveryUrl(state, image.id, "live", timestamp)
       : undefined,
     thumbnailUrl: buildDeliveryUrl(state, image.id, "thumbnail", timestamp),
     originalUrl: buildDeliveryUrl(state, image.id, "original", timestamp),
@@ -434,8 +438,13 @@ async function assertRemoteUrl(rawUrl: string) {
 
 async function readRemoteImage(rawUrl: string, maximumBytes: number) {
   const { url, address, family } = await assertRemoteUrl(rawUrl);
+  const signal = AbortSignal.timeout(REMOTE_UPLOAD_TIMEOUT_MS);
   return new Promise<{ buffer: Buffer; filename: string; mime: string }>(
     (resolve, reject) => {
+      const fail = (error: Error) => {
+        const message = signal.aborted ? "远程图片读取超时" : "无法读取远程图片";
+        reject(error instanceof PublicError ? error : new PublicError(400, "REMOTE_FETCH_FAILED", message));
+      };
       const requestImpl = url.protocol === "https:" ? httpsRequest : httpRequest;
       const request = requestImpl(
         url,
@@ -443,18 +452,18 @@ async function readRemoteImage(rawUrl: string, maximumBytes: number) {
           family,
           headers: {
             accept: "image/avif,image/heic,image/heif,image/webp,image/png,image/jpeg,image/gif",
-            "user-agent": "OU-Image-Hosting/1.0.0"
+            "user-agent": "OU-Image-Hosting/2.0.1"
           },
           lookup: (_hostname, _options, callback) => {
             callback(null, address, family);
           },
           servername: url.hostname,
-          timeout: REMOTE_UPLOAD_TIMEOUT_MS
+          signal
         },
         (response) => {
           const statusCode = response.statusCode ?? 0;
           if (statusCode < 200 || statusCode >= 300) {
-            response.resume();
+            response.destroy();
             reject(new PublicError(400, "REMOTE_FETCH_FAILED", "远程图片响应不可用"));
             return;
           }
@@ -483,19 +492,10 @@ async function readRemoteImage(rawUrl: string, maximumBytes: number) {
               mime: String(response.headers["content-type"] ?? "").split(";")[0] ?? ""
             });
           });
-          response.on("error", reject);
+          response.on("error", fail);
         }
       );
-      request.on("timeout", () => {
-        request.destroy(new PublicError(400, "REMOTE_FETCH_FAILED", "远程图片读取超时"));
-      });
-      request.on("error", (error) => {
-        reject(
-          error instanceof PublicError
-            ? error
-            : new PublicError(400, "REMOTE_FETCH_FAILED", "无法读取远程图片")
-        );
-      });
+      request.on("error", fail);
       request.end();
     }
   );
@@ -505,17 +505,17 @@ export async function registerUploadRoutes(
   app: FastifyInstance,
   options: UploadRouteOptions
 ) {
-  const { store, dataDirectory, now, authenticate } = options;
-  const storageRoot = path.join(dataDirectory, "storage");
+  const { store, media, now, authenticate } = options;
+  const storageRoot = media.root;
   const originalsDirectory = path.join(storageRoot, "originals");
   const thumbnailsDirectory = path.join(storageRoot, "thumbnails");
-  const objects = createObjectStorage(store, storageRoot, now);
   const quotaBytes = Number(
     process.env.OU_STORAGE_QUOTA_BYTES ?? 2 * 1024 * 1024 * 1024
   );
 
   await mkdir(originalsDirectory, { recursive: true });
   await mkdir(thumbnailsDirectory, { recursive: true });
+  await mkdir(path.join(storageRoot, "live"), { recursive: true });
   await app.register(multipart, {
     limits: {
       files: 2,
@@ -707,13 +707,15 @@ export async function registerUploadRoutes(
     });
   };
 
-  const ingest = async ({
+  const ingest = (input: Parameters<typeof ingestUnlocked>[0]) => media.run(() => ingestUnlocked(input));
+  const ingestUnlocked = async ({
     buffer,
     filename,
     mime,
     principal,
     publicVisible = false,
     publicUploadGuest = false,
+    nodeSeekAlbumId,
     livePhotoVideo
   }: {
     buffer: Buffer;
@@ -722,13 +724,22 @@ export async function registerUploadRoutes(
     principal: Principal;
     publicVisible?: boolean;
     publicUploadGuest?: boolean;
+    nodeSeekAlbumId?: string;
     livePhotoVideo?: {
-      key: string;
-      size: number;
+      buffer: Buffer;
       mime: string;
+      extension: string;
     };
   }) => {
     const state = store.snapshot();
+    const verifyNodeSeekGroup = (current: AppState) => {
+      if (!nodeSeekAlbumId) return;
+      const group = current.albums.find((album) => album.id === nodeSeekAlbumId && album.workspaceId === principal.workspaceId);
+      if (!group || group.nodeSeekPublic !== publicVisible) {
+        throw new PublicError(409, "NODESEEK_GROUP_CHANGED", "NodeSeek 分组已修改，请重试");
+      }
+    };
+    verifyNodeSeekGroup(state);
     const settings =
       state.workspaceSettings.find(
         (item) => item.workspaceId === principal.workspaceId
@@ -741,7 +752,7 @@ export async function registerUploadRoutes(
       throw new PublicError(413, "FILE_TOO_LARGE", "图片超过工作区上传上限");
     }
 
-    let metadata: SharpMetadata;
+    let metadata: Metadata;
     let format: string | undefined;
     let processingBuffer: Buffer | undefined;
     try {
@@ -779,13 +790,19 @@ export async function registerUploadRoutes(
     }
 
     const sha256 = createHash("sha256").update(buffer).digest("hex");
-    const existing = store
-      .snapshot()
-      .images.find(
-        (image) =>
-          image.workspaceId === principal.workspaceId &&
-          image.sha256 === sha256
-      );
+    const liveName = livePhotoVideo
+      ? `${createHash("sha256").update(livePhotoVideo.buffer).digest("hex")}.${livePhotoVideo.extension}`
+      : undefined;
+    // Guests share the owner's storage workspace but do not share image records.
+    const matches = (candidate: StoredImage) =>
+      !publicUploadGuest &&
+      !candidate.publicUploadGuest &&
+      candidate.workspaceId === principal.workspaceId &&
+      candidate.sha256 === sha256 &&
+      candidate.livePhotoVideoKey?.split("/").at(-1) === liveName &&
+      candidate.nodeSeekAlbumId === nodeSeekAlbumId &&
+      (!nodeSeekAlbumId || (candidate.albumIds.includes(nodeSeekAlbumId) && candidate.publicVisible === publicVisible));
+    const existing = state.images.find(matches);
     if (existing) {
       if (existing.deletedAt) {
         await store.update((state) => {
@@ -813,14 +830,12 @@ export async function registerUploadRoutes(
       };
     }
 
-    const usedBytes = calculateImageStorageBytes(store.snapshot().images);
-    if (usedBytes + buffer.byteLength > quotaBytes) {
-      throw new PublicError(413, "QUOTA_EXCEEDED", "存储空间不足");
-    }
-
     const id = randomUUID();
-    const originalKey = `originals/${sha256}.${extensionByFormat[typedFormat]}`;
-    const thumbnailKey = `thumbnails/${id}.webp`;
+    const provider = state.storageSettings.active;
+    const extension = extensionByFormat[typedFormat];
+    const originalKey = media.key(provider, `originals/${sha256}.${extension}`, `originals/${id}.${extension}`);
+    const thumbnailKey = media.key(provider, `thumbnails/${id}.webp`);
+    const liveKey = liveName ? media.key(provider, `live/${liveName}`, `live/${id}/${liveName}`) : undefined;
 
     processingBuffer ??= await sourceBufferForProcessing(buffer, typedFormat);
     const thumbnail = await sharp(processingBuffer, {
@@ -837,11 +852,6 @@ export async function registerUploadRoutes(
       })
       .webp({ quality: settings.processingQuality, effort: 3 })
       .toBuffer();
-
-    await Promise.all([
-      objects.write(originalKey, buffer),
-      objects.write(thumbnailKey, thumbnail)
-    ]);
 
     const createdAt = now();
     const timestamp = createdAt.toISOString();
@@ -876,16 +886,31 @@ export async function registerUploadRoutes(
       favorite: false,
       favoriteUserIds: [],
       publicVisible,
-      albumIds: [],
+      nodeSeekAlbumId,
+      albumIds: nodeSeekAlbumId ? [nodeSeekAlbumId] : [],
       tagIds: [],
       publicUploadGuest,
-      livePhotoVideoKey: livePhotoVideo?.key,
-      livePhotoVideoSize: livePhotoVideo?.size,
+      livePhotoVideoKey: liveKey,
+      livePhotoVideoSize: livePhotoVideo?.buffer.byteLength,
       livePhotoVideoMime: livePhotoVideo?.mime,
       createdAt: timestamp,
       updatedAt: timestamp
     };
-    await store.update((state) => {
+    // Commit the quota check and image metadata together. Other upload requests
+    // may have completed while Sharp was processing this image.
+    const createdFiles: string[] = [];
+    await store.update(async (state) => {
+      if (calculateImageStorageBytes([...state.images, image]) > quotaBytes) {
+        throw new PublicError(413, "QUOTA_EXCEEDED", "存储空间不足");
+      }
+      verifyNodeSeekGroup(state);
+      const duplicate = state.images.find(matches);
+      if (duplicate) throw new PublicError(409, "CONCURRENT_DUPLICATE", "同一图片正在由其他任务上传，请重试以取回链接");
+      // Serialize file writes with metadata changes so failed quota reservations
+      // do not leave uploaded files behind or delete another request's files.
+      await media.write(state, originalKey, buffer, createdFiles);
+      await media.write(state, thumbnailKey, thumbnail, createdFiles);
+      if (liveKey && livePhotoVideo) await media.write(state, liveKey, livePhotoVideo.buffer, createdFiles);
       state.images.push(image);
       const date = workspaceDate(createdAt, settings.timezone);
       let daily = state.analyticsDaily.find(
@@ -917,6 +942,9 @@ export async function registerUploadRoutes(
           item.workspaceId !== principal.workspaceId ||
           retainedDates.has(item.date)
       );
+    }).catch(async (error: unknown) => {
+      await media.rollbackWrites(createdFiles);
+      throw error;
     });
     return {
       image: publicImage(
@@ -941,7 +969,7 @@ export async function registerUploadRoutes(
       count: images.filter((image) => !image.deletedAt).length,
       bytes: calculateImageStorageBytes(images),
       quotaBytes,
-      storageProvider: state.storageSettings.active
+      activeStorage: state.storageSettings.active
     };
   });
 
@@ -954,6 +982,8 @@ export async function registerUploadRoutes(
           additionalProperties: false,
           properties: {
             q: { type: "string", maxLength: 120 },
+            albumId: { type: "string", minLength: 1, maxLength: 80 },
+            excludeAlbumId: { type: "string", minLength: 1, maxLength: 80 },
             format: {
               type: "string",
               enum: ["all", "jpeg", "png", "webp", "gif", "avif", "heic", "heif"]
@@ -991,6 +1021,8 @@ export async function registerUploadRoutes(
             !query || image.name.toLocaleLowerCase().includes(query)
         )
         .filter((image) => format === "all" || image.format === format)
+        .filter((image) => !request.query.albumId || image.albumIds.includes(request.query.albumId))
+        .filter((image) => !request.query.excludeAlbumId || !image.albumIds.includes(request.query.excludeAlbumId))
         .sort((a, b) => {
           if (sort === "oldest") return a.createdAt.localeCompare(b.createdAt);
           if (sort === "name") return a.name.localeCompare(b.name, "zh-CN");
@@ -1208,6 +1240,25 @@ export async function registerUploadRoutes(
     }
   );
 
+  const readUploadPart = async (request: FastifyRequest) => {
+    let part;
+    try {
+      part = await request.file();
+    } catch {
+      throw new PublicError(413, "FILE_TOO_LARGE", "图片不能超过 20 MB");
+    }
+    if (!part || part.fieldname !== "file") {
+      throw new PublicError(400, "FILE_REQUIRED", "请选择需要上传的图片");
+    }
+    let buffer: Buffer;
+    try {
+      buffer = await part.toBuffer();
+    } catch {
+      throw new PublicError(413, "FILE_TOO_LARGE", "图片不能超过 20 MB");
+    }
+    return { buffer, filename: part.filename, mime: part.mimetype };
+  };
+
   app.post(
     "/uploads",
     {
@@ -1217,29 +1268,51 @@ export async function registerUploadRoutes(
     async (request, reply) => {
       const principal = authenticate(request);
       requireCapability(principal, "write", ["images:write"]);
-      let part;
-      try {
-        part = await request.file();
-      } catch {
-        throw new PublicError(413, "FILE_TOO_LARGE", "图片不能超过 20 MB");
-      }
-      if (!part || part.fieldname !== "file") {
-        throw new PublicError(400, "FILE_REQUIRED", "请选择需要上传的图片");
-      }
-      let buffer: Buffer;
-      try {
-        buffer = await part.toBuffer();
-      } catch {
-        throw new PublicError(413, "FILE_TOO_LARGE", "图片不能超过 20 MB");
-      }
+      const file = await readUploadPart(request);
       const result = await ingest({
-        buffer,
-        filename: part.filename,
-        mime: part.mimetype,
+        ...file,
         principal,
         publicUploadGuest: false
       });
       return reply.status(result.duplicate ? 200 : 201).send(result);
+    }
+  );
+
+  app.post<{ Body: Partial<UrlUploadBody> }>(
+    "/integrations/nodeseek/uploads",
+    {
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+      bodyLimit: MAX_FILE_SIZE + 1024 * 1024
+    },
+    async (request, reply) => {
+      const principal = authenticate(request);
+      requireCapability(principal, "write", ["nodeseek:upload"]);
+      const nodeSeekAlbumId = principal.apiToken?.nodeSeekAlbumId;
+      if (principal.kind !== "api-token" || !nodeSeekAlbumId) {
+        throw new PublicError(403, "NODESEEK_TOKEN_REQUIRED", "请使用专用 NodeSeek 上传凭据");
+      }
+      const state = store.snapshot();
+      const group = state.albums.find((album) =>
+        album.id === nodeSeekAlbumId && album.workspaceId === principal.workspaceId);
+      if (!group || group.nodeSeekPublic === undefined) {
+        throw new PublicError(404, "NODESEEK_GROUP_NOT_FOUND", "NodeSeek 分组不存在");
+      }
+      let source;
+      if (request.isMultipart()) {
+        source = await readUploadPart(request);
+      } else {
+        const url = request.body?.url;
+        if (typeof url !== "string" || url.length < 8 || url.length > 2048) {
+          throw new PublicError(400, "INVALID_REMOTE_URL", "请输入有效的图片地址");
+        }
+        const settings = state.workspaceSettings.find((item) => item.workspaceId === principal.workspaceId);
+        source = await readRemoteImage(url, Math.min(MAX_REMOTE_SIZE, settings?.uploadMaxBytes ?? MAX_FILE_SIZE));
+      }
+      const result = await ingest({ ...source, principal, nodeSeekAlbumId, publicVisible: group.nodeSeekPublic });
+      return reply.status(result.duplicate ? 200 : 201).send({
+        url: result.image.originalUrl,
+        duplicate: result.duplicate
+      });
     }
   );
 
@@ -1497,6 +1570,7 @@ export async function registerUploadRoutes(
           "管理员已开启登录后上传，请先登录再上传图片"
         );
       }
+      if (principal) requireCapability(principal, "write", ["images:write"]);
       const authenticated = Boolean(principal);
       if (!authenticated && state.site.publicUploadHumanVerificationEnabled) {
         await consumeHumanChallenge(request);
@@ -1587,27 +1661,22 @@ export async function registerUploadRoutes(
       const { buffer } = imageFile;
       let quotaReserved = false;
       try {
+        const uploadedBytes = buffer.byteLength + (liveVideoFile?.buffer.byteLength ?? 0);
         await reservePublicUploadQuota({
           ...reservation,
           sourceIp,
           authenticated,
-          bytes: buffer.byteLength
+          bytes: uploadedBytes
         });
         quotaReserved = true;
         let livePhotoVideo:
-          | { key: string; size: number; mime: string }
+          | { buffer: Buffer; mime: string; extension: string }
           | undefined;
         if (liveVideoFile) {
-          const videoHash = createHash("sha256").update(liveVideoFile.buffer).digest("hex");
-          const extension = liveVideoFile.filename.toLowerCase().endsWith(".mp4")
-            ? "mp4"
-            : "mov";
-          const key = `live/${videoHash}.${extension}`;
-          await objects.write(key, liveVideoFile.buffer);
+          const videoInfo = inspectLivePhotoVideo(liveVideoFile.buffer);
           livePhotoVideo = {
-            key,
-            size: liveVideoFile.buffer.byteLength,
-            mime: liveVideoFile.mimetype || "video/quicktime"
+            buffer: liveVideoFile.buffer,
+            ...videoInfo
           };
         }
         const result = await ingest({
@@ -1623,7 +1692,7 @@ export async function registerUploadRoutes(
           ...reservation,
           sourceIp,
           authenticated,
-          bytes: buffer.byteLength,
+          bytes: uploadedBytes,
           imageId: result.image.id,
           duplicate: result.duplicate,
           quotaReserved
@@ -1634,7 +1703,7 @@ export async function registerUploadRoutes(
           ...reservation,
           sourceIp,
           authenticated,
-          bytes: buffer.byteLength,
+          bytes: buffer.byteLength + (liveVideoFile?.buffer.byteLength ?? 0),
           failureCode:
             error instanceof PublicError ? error.code : "UPLOAD_FAILED",
           quotaReserved
@@ -1681,8 +1750,8 @@ export async function registerUploadRoutes(
   );
 
   app.get<{
-    Params: { id: string; variant: "original" | "thumbnail" };
-    Querystring: { expires?: string; signature?: string };
+    Params: { id: string; variant: "original" | "thumbnail" | "live" };
+    Querystring: { expires?: string; signature?: string; v?: string };
   }>(
     "/files/:id/:variant",
     {
@@ -1692,13 +1761,14 @@ export async function registerUploadRoutes(
           required: ["id", "variant"],
           properties: {
             id: { type: "string", minLength: 1, maxLength: 80 },
-            variant: { type: "string", enum: ["original", "thumbnail"] }
+            variant: { type: "string", enum: ["original", "thumbnail", "live"] }
           }
         },
         querystring: {
           type: "object",
           additionalProperties: false,
           properties: {
+            v: { type: "string", maxLength: 100 },
             expires: { type: "string", pattern: "^[0-9]+$" },
             signature: {
               type: "string",
@@ -1723,27 +1793,39 @@ export async function registerUploadRoutes(
         now()
       );
       const isThumbnail = request.params.variant === "thumbnail";
-      const key = isThumbnail ? image.thumbnailKey : image.originalKey;
-      const body = await objects.open(key);
+      const isLive = request.params.variant === "live";
+      const key = isLive ? image.livePhotoVideoKey : isThumbnail ? image.thumbnailKey : image.originalKey;
+      if (!key) throw new PublicError(404, "MEDIA_NOT_FOUND", "这张图片没有动态片段");
+      const { size, range, body } = await media.open(key, request.headers["if-range"] ? undefined : request.headers.range);
+      const protectedDelivery = state.deliverySettings.signedUrls || state.deliverySettings.hotlinkEnabled;
       reply
-        .type(isThumbnail ? "image/webp" : image.mime)
-        .header("cache-control", "public, max-age=60, must-revalidate")
-        .header("content-disposition", "inline");
+        .type(isLive ? image.livePhotoVideoMime ?? "video/mp4" : isThumbnail ? "image/webp" : image.mime)
+        .header("cache-control", protectedDelivery ? "private, no-store" : "public, max-age=60, must-revalidate")
+        .header("content-disposition", "inline")
+        .header("accept-ranges", "bytes");
+      if (range === "unsatisfiable") return reply.code(416).header("content-range", `bytes */${size}`).send();
+      if (range) {
+        return reply.code(206)
+          .header("content-range", `bytes ${range.start}-${range.end}/${size}`)
+          .header("content-length", range.end - range.start + 1)
+          .send(body);
+      }
+      if (size !== undefined) reply.header("content-length", size);
       return reply.send(body);
     }
   );
 
   registerImageDetailRoutes(app, {
+    media,
     store,
-    dataDirectory,
     now,
     authenticate,
     quotaBytes
   });
 
   registerOrganizationRoutes(app, {
+    media,
     store,
-    dataDirectory,
     now,
     authenticate
   });

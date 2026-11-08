@@ -2,8 +2,10 @@ name: Sync upstream
 
 # Merges cshaizhihao/ou-image-hosting main into this fork and starts a
 # release when anything new came in. When the merge conflicts, or it touches
-# workflow files the default token may not push, a pull request from upstream
-# is opened instead and the run fails so the owner gets notified.
+# workflow files the default token may not push, an issue lists what needs a
+# manual merge and the run fails so the owner gets notified. (A pull request
+# straight from the upstream fork is refused by GitHub: "Fork collab can't be
+# granted by someone without permission".)
 on:
   schedule:
     - cron: "23 */6 * * *"
@@ -11,7 +13,7 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
+  issues: write
   actions: write
 
 concurrency:
@@ -46,11 +48,13 @@ jobs:
             echo "result=up-to-date" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
           if ! git merge --no-edit -m "chore: merge upstream ${upstream_sha}" upstream/main; then
+            git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/' > "$RUNNER_TEMP/conflicts.md"
             {
               echo "### 上游合并冲突"
               echo
-              git diff --name-only --diff-filter=U | sed 's/^/- /'
+              cat "$RUNNER_TEMP/conflicts.md"
             } >> "$GITHUB_STEP_SUMMARY"
             git merge --abort
             echo "result=conflict" >> "$GITHUB_OUTPUT"
@@ -70,19 +74,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run release.yml --ref main
 
-      - name: Open pull request from upstream
+      - name: Report a manual merge
         if: steps.merge.outputs.result == 'conflict' || steps.merge.outputs.result == 'push-rejected'
         env:
           GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ steps.merge.outputs.result }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          head="${UPSTREAM_REPOSITORY%%/*}:main"
-          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --base main --head main --json number,headRepositoryOwner --jq ".[] | select(.headRepositoryOwner.login == \"${UPSTREAM_REPOSITORY%%/*}\") | .number" | head -n 1)"
-          if [[ -z "$existing" ]]; then
-            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$head" \
-              --title "同步上游更新" \
-              --body "自动同步未能直接合并上游 ${UPSTREAM_REPOSITORY} 的 main（${{ steps.merge.outputs.result }}），请在此处理后合并。"
+          title="同步上游需要手动合并"
+          {
+            if [[ "$RESULT" == conflict ]]; then
+              echo "自动同步无法直接合并上游 \`${UPSTREAM_REPOSITORY}\` 的 main（\`${UPSTREAM_SHA}\`），以下文件有冲突："
+              echo
+              cat "$RUNNER_TEMP/conflicts.md"
+            else
+              echo "上游 \`${UPSTREAM_SHA}\` 修改了工作流文件，默认令牌不能推送。配置带 workflow 权限的 \`SYNC_TOKEN\`，或手动合并。"
+            fi
+            echo
+            echo "本地处理：\`git fetch https://github.com/${UPSTREAM_REPOSITORY}.git main && git merge FETCH_HEAD\`，解决后走 PR 合并。"
+            echo
+            echo "运行记录：${RUN_URL}"
+          } > "$RUNNER_TEMP/issue.md"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"${title}\" in:title" --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/issue.md"
           fi
-          echo "需要手动处理上游同步，见 Pull Request。" >> "$GITHUB_STEP_SUMMARY"
+          echo "需要手动合并上游，见 issue「${title}」。" >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
       # GitHub disables scheduled workflows after 60 days without repository

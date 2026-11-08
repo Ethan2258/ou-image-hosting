@@ -1,5 +1,7 @@
 # Production deployment
 
+For a VPS already hosting other services, use the [isolated Cloudflare Tunnel deployment](./tunnel-deployment.md). It keeps existing ports 80/443 and reverse proxies untouched.
+
 This guide deploys OU-Image Hosting as three containers:
 
 - `web`: the public Next.js process, bound to host loopback by default.
@@ -7,21 +9,23 @@ This guide deploys OU-Image Hosting as three containers:
 - `caddy`: the optional `https` profile, terminating TLS on ports 80/443 and
   proxying to Web.
 
-The API stores metadata and image files in one Docker volume, or writes image
-files to Amazon S3 / Cloudflare R2 when one of them is set as the active storage.
-PostgreSQL, Redis, and an external job queue are not enabled by this deployment.
+The API keeps metadata in one Docker volume. Images use that volume by default.
+The storage console can switch new media writes to Amazon S3 or Cloudflare R2.
 
 ## Architecture boundaries
 
 - Metadata persistence is one JSON file managed by one API process.
-- With local storage active, image originals, thumbnails, versions, and Live
-  Photo clips live in the persistent volume. Backups always stay in the volume.
+- New originals, thumbnails, edited versions, and Live Photo videos go to the
+  active provider. Existing media stays readable in its original location.
 - PostgreSQL and Redis environment variables only affect status/configuration
   reporting. They do not move persistence or jobs out of the API process.
-- When S3 or R2 is the active storage, new uploads are written to the bucket and
-  permanent deletion also removes the remote objects. Reads prefer a local copy,
-  then fall back to the configured buckets, so images uploaded before a switch
-  keep working without migration.
+- Switching providers checks bucket access and verifies a temporary object can
+  be written, read, and deleted. Keep bucket credentials available while it
+  holds media. S3 buckets with versioning retain historical object versions
+  according to the bucket lifecycle policy.
+- Application backups include reachable media from all providers within the
+  archive size limits. Restoring an archive extracts its media into the local
+  data volume.
 - Run exactly one API replica. Multiple API replicas can race on the same JSON
   file and are unsupported.
 
@@ -74,12 +78,11 @@ COMPOSE_PARALLEL_LIMIT=1 docker compose --env-file .env.production build api
 COMPOSE_PARALLEL_LIMIT=1 docker compose --env-file .env.production build web
 ```
 
-Local builds use Node.js 24.21.0 LTS (set in `docker-compose.yml`; the
-upstream Dockerfile still defaults to Node 20, which is end of life) and pnpm
-9.15.9, install with the frozen lockfile, and run as the unprivileged `node`
-user. The images published to GHCR by this fork's release workflow use the same
-`NODE_VERSION=24.21.0`. To build on another Node version, set `OU_NODE_VERSION`
-in `.env.production`, for example `OU_NODE_VERSION=20.20.2`.
+Local builds and the images published by this fork pin Node.js 24.22.1
+(set in `docker-compose.yml` and the release workflow) and pnpm 9.15.9,
+install with the frozen lockfile, and run as the unprivileged `node` user.
+To build on another Node version, set `OU_NODE_VERSION` in
+`.env.production`, for example `OU_NODE_VERSION=24.21.0`.
 
 On CPU-limited hosts, prefer images built by CI. `nice` does not reliably limit
 the Docker daemon, and a local Next.js/Sharp build may temporarily exceed a

@@ -1,11 +1,13 @@
 {
   "name": "ou-image-hosting",
-  "version": "1.0.0",
+  "version": "2.0.1",
   "private": true,
   "packageManager": "pnpm@9.15.9",
   "scripts": {
     "dev": "pnpm --filter @ou-image/web dev",
     "dev:api": "pnpm --filter @ou-image/api dev",
+    "preview:local": "node scripts/local-preview.mjs",
+    "preview:stop": "node scripts/stop-local-preview.mjs",
     "build": "pnpm --workspace-concurrency=1 -r build",
     "typecheck": "pnpm --workspace-concurrency=1 -r typecheck",
     "test": "vitest run --maxWorkers=1",
@@ -23,16 +25,16 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",
-    "@playwright/test": "1.61.1",
+    "@playwright/test": "1.65.0",
     "@types/node": "^20.19.43",
-    "playwright": "1.61.1",
+    "playwright": "1.65.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12",
     "vite": "7.3.7"
   },
   "pnpm": {
     "overrides": {
-      "postcss": "^8.5.23",
+      "postcss": "^8.5.32",
       "nanoid@3": "^3.3.18",
       "fast-uri@3": "^3.1.6",
       "fast-uri@4": "^4.1.3",

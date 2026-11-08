@@ -5,15 +5,15 @@ import type {
 } from "fastify";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import type { Readable } from "node:stream";
 import sharp from "sharp";
+import type { MediaStorage } from "./media-storage.js";
+import type { Readable } from "node:stream";
 import {
   requireCapability,
   type Principal
 } from "./access.js";
 import { buildDeliveryUrl } from "./delivery.js";
 import { PublicError } from "./errors.js";
-import { createObjectStorage } from "./object-storage.js";
 import {
   createOpaqueToken,
   hashOpaqueToken,
@@ -52,8 +52,8 @@ const mimeByFormat = {
 } as const;
 
 type ImageDetailRouteOptions = {
+  media: MediaStorage;
   store: AppStore;
-  dataDirectory: string;
   now: () => Date;
   quotaBytes: number;
   authenticate: (request: FastifyRequest) => Principal;
@@ -355,12 +355,7 @@ export function registerImageDetailRoutes(
   app: FastifyInstance,
   options: ImageDetailRouteOptions
 ) {
-  const { store, dataDirectory, now, authenticate, quotaBytes } = options;
-  const objects = createObjectStorage(
-    store,
-    path.join(dataDirectory, "storage"),
-    now
-  );
+  const { store, media, now, authenticate, quotaBytes } = options;
 
   app.get<{ Params: IdParams }>(
     "/uploads/:id",
@@ -503,7 +498,7 @@ export function registerImageDetailRoutes(
           processingQuality: 85,
           thumbnailWidth: 480
         };
-      const input = await objects.read(image.originalKey);
+      const input = await media.read(image.originalKey);
       let transformed;
       try {
         transformed = await transformBuffer(
@@ -534,35 +529,30 @@ export function registerImageDetailRoutes(
       if (usedBytes + transformed.buffer.byteLength > quotaBytes) {
         throw new PublicError(413, "QUOTA_EXCEEDED", "存储空间不足");
       }
-      const originalKey =
-        `versions/${image.id}/${versionId}.` +
-        extensionByFormat[transformed.format];
-      const thumbnailKey = `thumbnails/${image.id}-${versionId}.webp`;
       const thumbnail = await createThumbnail(
         transformed.buffer,
         settings.thumbnailWidth,
         settings.processingQuality
       );
-      await Promise.all([
-        objects.write(originalKey, transformed.buffer),
-        objects.write(thumbnailKey, thumbnail)
-      ]);
-
-      const version: StoredImageVersion = {
-        id: versionId,
-        operation: request.body.action,
-        sourceVersionId: image.currentVersionId,
-        size: transformed.buffer.byteLength,
-        mime: mimeByFormat[transformed.format],
-        format: transformed.format,
-        width: metadata.width,
-        height: metadata.height,
-        sha256: createHash("sha256").update(transformed.buffer).digest("hex"),
-        originalKey,
-        thumbnailKey,
-        createdAt: timestamp
-      };
-      const updated = await store.update((state) => {
+      const created: string[] = [];
+      const updated = await media.run(() => store.update(async (state) => {
+        const provider = state.storageSettings.active;
+        const originalKey = media.key(provider, `versions/${image.id}/${versionId}.${extensionByFormat[transformed.format]}`);
+        const thumbnailKey = media.key(provider, `thumbnails/${image.id}-${versionId}.webp`);
+        const version: StoredImageVersion = {
+          id: versionId,
+          operation: request.body.action,
+          sourceVersionId: image.currentVersionId,
+          size: transformed.buffer.byteLength,
+          mime: mimeByFormat[transformed.format],
+          format: transformed.format,
+          width: metadata.width,
+          height: metadata.height,
+          sha256: createHash("sha256").update(transformed.buffer).digest("hex"),
+          originalKey,
+          thumbnailKey,
+          createdAt: timestamp
+        };
         const current = state.images.find(
           (item) =>
             item.id === image.id &&
@@ -572,6 +562,14 @@ export function registerImageDetailRoutes(
         if (!current) {
           throw new PublicError(404, "IMAGE_NOT_FOUND", "图片不存在");
         }
+        if (current.currentVersionId !== image.currentVersionId) {
+          throw new PublicError(409, "IMAGE_CHANGED", "图片已被其他操作更新，请刷新后再编辑");
+        }
+        if (calculateImageStorageBytes(state.images) + transformed.buffer.byteLength > quotaBytes) {
+          throw new PublicError(413, "QUOTA_EXCEEDED", "存储空间不足");
+        }
+        await media.write(state, originalKey, transformed.buffer, created);
+        await media.write(state, thumbnailKey, thumbnail, created);
         current.versions.push(version);
         current.currentVersionId = version.id;
         current.size = version.size;
@@ -587,7 +585,10 @@ export function registerImageDetailRoutes(
           current.name = replaceExtension(current.name, version.format);
         }
         return current;
-      });
+      }).catch(async (error: unknown) => {
+        await media.rollbackWrites(created);
+        throw error;
+      }));
       const state = store.snapshot();
       return reply.status(201).send({
         image: publicDetail(
@@ -597,7 +598,7 @@ export function registerImageDetailRoutes(
           now(),
           principal.user.id
         ),
-        version: publicVersion(updated.id, version, state, now())
+        version: publicVersion(updated.id, updated.versions.at(-1)!, state, now())
       });
     }
   );
@@ -722,10 +723,9 @@ export function registerImageDetailRoutes(
       if (!image || !version) {
         throw new PublicError(404, "VERSION_NOT_FOUND", "图片版本不存在");
       }
-      const body = await objects.open(version.originalKey);
       return sendImage(
         reply,
-        body,
+        (await media.open(version.originalKey)).body!,
         version.mime,
         replaceExtension(image.name, version.format)
       );
@@ -852,7 +852,6 @@ export function registerImageDetailRoutes(
           accessCount: share.accessCount
         },
         image: {
-          id: image.id,
           name: image.name,
           size: image.size,
           mime: image.mime,
@@ -961,10 +960,9 @@ export function registerImageDetailRoutes(
             retainedDates.has(item.date)
         );
       });
-      const body = await objects.open(image.originalKey);
       return sendImage(
         reply,
-        body,
+        (await media.open(image.originalKey)).body!,
         image.mime,
         image.name
       );

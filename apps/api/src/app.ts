@@ -43,6 +43,9 @@ import {
   type StoredUser,
   type ThemePreference
 } from "./store.js";
+import { nodeSeekSettings } from "./nodeseek-settings.js";
+import { nodeSeekUserscript } from "./nodeseek-userscript.js";
+import { MediaStorage } from "./media-storage.js";
 import { registerUploadRoutes } from "./uploads.js";
 import { registerInfrastructureRoutes } from "./infrastructure.js";
 import { registerWorkspaceSecurityRoutes } from "./workspace-security.js";
@@ -92,7 +95,7 @@ export function redactCapabilityUrl(value: string) {
     .replace(/(\/invites\/)[^/?#]+/g, "$1[REDACTED]");
 }
 
-function publicSiteStatus(site: AppState["site"]) {
+function publicSiteStatus(site: AppState["site"], storage: AppState["storageSettings"]["active"]) {
   return site
     ? {
         siteName: site.siteName,
@@ -111,7 +114,7 @@ function publicSiteStatus(site: AppState["site"]) {
         loginEyebrow: site.loginEyebrow,
         loginHeroTitle: site.loginHeroTitle,
         loginHeroDescription: site.loginHeroDescription,
-        defaultStorage: site.defaultStorage,
+        defaultStorage: storage,
         theme: site.theme,
         accentPreset: site.accentPreset
       }
@@ -333,6 +336,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
     if (!isRestoreRequest && !isBackupRequest && !isBackupRetryRequest) {
       writeReleases.set(request, maintenance.beginWrite());
     }
+    // This endpoint requires a dedicated bearer token and never accepts a cookie session.
+    if (request.method === "POST" && request.url.split("?", 1)[0] === "/integrations/nodeseek/uploads" &&
+        typeof request.headers.authorization === "string" &&
+        request.headers.authorization.startsWith("Bearer ")) return;
+
     const origin = request.headers.origin;
     const hasSessionCookie = Boolean(request.cookies[SESSION_COOKIE]);
     const hasBrowserSignal =
@@ -477,6 +485,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
     );
     if (!user || !membership || !workspace) {
       throw new PublicError(401, "INVALID_API_TOKEN", "API Token 无效");
+    }
+    if (user.disabledAt) {
+      throw new PublicError(403, "ACCOUNT_DISABLED", "账号已被停用，请联系站点管理员");
     }
     return {
       kind: "api-token",
@@ -656,13 +667,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   app.get("/health", async () => ({
     status: "ok",
     service: "ou-image-api",
-    version: "1.0.0"
+    version: "2.0.1"
   }));
 
   app.get("/health/live", async () => ({
     status: "ok",
     service: "ou-image-api",
-    version: "1.0.0"
+    version: "2.0.1"
   }));
 
   const probeDirectory = async (directory: string, label: string) => {
@@ -715,7 +726,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     const state = store.snapshot();
     return {
       setupComplete: state.setupComplete,
-      site: publicSiteStatus(state.site)
+      site: publicSiteStatus(state.site, state.storageSettings.active)
     };
   });
 
@@ -1135,6 +1146,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
           state.sessions = state.sessions.filter(
             (session) => session.userId !== user.id
           );
+          state.apiTokens.forEach((token) => {
+            if (token.userId === user.id && !token.revokedAt) token.revokedAt = timestamp;
+          });
         }
         addAuditEvent(state, {
           principal,
@@ -1323,7 +1337,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       const email = normalizeEmail(request.body.email);
       const user = store.snapshot().users.find((item) => item.email === email);
       let resetToken: string | undefined;
-      if (user) {
+      if (user && exposeDevelopmentResetToken) {
         resetToken = createOpaqueToken();
         const timestamp = now();
         await store.update((state) => {
@@ -1342,7 +1356,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
         });
       }
       return {
-        message: "如果该邮箱存在，我们已创建密码重置请求",
+        message: exposeDevelopmentResetToken ? "如果该邮箱存在，我们已创建密码重置请求" : "本站尚未配置邮件找回，请联系站点管理员恢复账号",
+        recoveryMethod: exposeDevelopmentResetToken ? "development" : "administrator",
         ...(resetToken && exposeDevelopmentResetToken
           ? { developmentResetToken: resetToken }
           : {})
@@ -1406,6 +1421,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
         draft.sessions = draft.sessions.filter(
           (session) => session.userId !== user.id
         );
+        draft.apiTokens.forEach((token) => { if (token.userId === user.id && !token.revokedAt) token.revokedAt = timestamp.toISOString(); });
+        draft.loginChallenges = draft.loginChallenges.filter((challenge) => challenge.userId !== user.id);
       });
       return { message: "密码已更新，请使用新密码登录" };
     }
@@ -1455,9 +1472,20 @@ export async function buildApp(options: BuildAppOptions = {}) {
     }
   );
 
+  app.get("/integrations/nodeseek/settings.html", async (_request, reply) => {
+    const page = nodeSeekSettings();
+    return reply.type("text/html; charset=utf-8").header("content-security-policy", page.csp).send(page.html);
+  });
+
+  app.get("/integrations/nodeseek/install.user.js", async (_request, reply) => {
+    return reply.type("text/javascript; charset=utf-8").header("cache-control", "no-store")
+      .send(nodeSeekUserscript(appOrigin));
+  });
+
+  const media = new MediaStorage(dataDirectory, store, now);
   await registerUploadRoutes(app, {
     store,
-    dataDirectory,
+    media,
     now,
     authenticate: authenticatedUser
   });
@@ -1470,6 +1498,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
   registerOperationsRoutes(app, {
     store,
+    media,
     dataDirectory,
     appOrigin,
     now,
@@ -1478,6 +1507,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   registerInfrastructureRoutes(app, {
     store,
+    media,
     dataDirectory,
     now,
     authenticate: authenticatedUser,

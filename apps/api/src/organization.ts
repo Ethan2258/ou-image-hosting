@@ -1,13 +1,13 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
-import path from "node:path";
+import { mediaKeys, type MediaStorage } from "./media-storage.js";
 import {
   requireCapability,
+  requireSession,
   type Principal
 } from "./access.js";
 import { buildDeliveryUrl } from "./delivery.js";
 import { PublicError } from "./errors.js";
-import { createObjectStorage } from "./object-storage.js";
 import type {
   AppState,
   AppStore,
@@ -17,20 +17,22 @@ import type {
 } from "./store.js";
 
 type OrganizationRouteOptions = {
+  media: MediaStorage;
   store: AppStore;
-  dataDirectory: string;
   now: () => Date;
   authenticate: (request: FastifyRequest) => Principal;
 };
 
 type IdParams = { id: string };
 type AlbumBody = {
+  nodeSeekPublic?: boolean;
   name: string;
   description?: string;
   coverImageId?: string;
   coverMode?: "auto" | "none";
 };
 type AlbumPatchBody = {
+  nodeSeekPublic?: boolean;
   name?: string;
   description?: string;
   coverImageId?: string | null;
@@ -128,6 +130,7 @@ function publicAlbum(
       : "auto";
   return {
     id: album.id,
+    nodeSeekPublic: album.nodeSeekPublic,
     name: album.name,
     description: album.description,
     coverImageId: album.coverImageId,
@@ -298,12 +301,7 @@ export function registerOrganizationRoutes(
   app: FastifyInstance,
   options: OrganizationRouteOptions
 ) {
-  const { store, dataDirectory, now, authenticate } = options;
-  const objects = createObjectStorage(
-    store,
-    path.join(dataDirectory, "storage"),
-    now
-  );
+  const { store, media, now, authenticate } = options;
 
   app.get("/albums", async (request) => {
     const principal = authenticate(request);
@@ -328,6 +326,7 @@ export function registerOrganizationRoutes(
           additionalProperties: false,
           required: ["name"],
           properties: {
+            nodeSeekPublic: { type: "boolean" },
             name: { type: "string", minLength: 1, maxLength: 60 },
             description: { type: "string", maxLength: 240 },
             coverImageId: {
@@ -343,6 +342,10 @@ export function registerOrganizationRoutes(
     async (request, reply) => {
       const principal = authenticate(request);
       requireCapability(principal, "write", ["organization:write"]);
+      if (request.body.nodeSeekPublic !== undefined) {
+        requireSession(principal);
+        requireCapability(principal, "admin");
+      }
       const state = store.snapshot();
       validateCover(
         state,
@@ -352,6 +355,7 @@ export function registerOrganizationRoutes(
       const timestamp = now().toISOString();
       const album: StoredAlbum = {
         id: randomUUID(),
+        nodeSeekPublic: request.body.nodeSeekPublic,
         userId: principal.user.id,
         workspaceId: principal.workspaceId,
         name: validateName(request.body.name, 60, "INVALID_ALBUM_NAME"),
@@ -383,6 +387,7 @@ export function registerOrganizationRoutes(
           additionalProperties: false,
           minProperties: 1,
           properties: {
+            nodeSeekPublic: { type: "boolean" },
             name: { type: "string", minLength: 1, maxLength: 60 },
             description: { type: "string", maxLength: 240 },
             coverImageId: {
@@ -399,6 +404,10 @@ export function registerOrganizationRoutes(
     async (request) => {
       const principal = authenticate(request);
       requireCapability(principal, "write", ["organization:write"]);
+      if (request.body.nodeSeekPublic !== undefined) {
+        requireSession(principal);
+        requireCapability(principal, "admin");
+      }
       const timestamp = now().toISOString();
       const album = await store.update((state) => {
         const current = findAlbum(
@@ -436,6 +445,16 @@ export function registerOrganizationRoutes(
         if (request.body.coverMode !== undefined) {
           delete current.coverImageId;
           current.coverMode = request.body.coverMode;
+        }
+        if (request.body.nodeSeekPublic !== undefined) {
+          current.nodeSeekPublic = request.body.nodeSeekPublic;
+          for (const image of state.images) {
+            if (image.workspaceId === principal.workspaceId && image.nodeSeekAlbumId === current.id &&
+                image.albumIds.includes(current.id)) {
+              image.publicVisible = current.nodeSeekPublic;
+              image.updatedAt = timestamp;
+            }
+          }
         }
         current.updatedAt = timestamp;
         return current;
@@ -877,64 +896,45 @@ export function registerOrganizationRoutes(
         return { restored };
       }
 
-      const deletion = await store.update((draft) => {
-        const timestamp = now().toISOString();
-        const targets = draft.images.filter(
-          (image) =>
-            ids.has(image.id) &&
-            image.workspaceId === principal.workspaceId &&
-            Boolean(image.deletedAt)
-        );
-        if (targets.length !== ids.size) {
-          throw new PublicError(
-            400,
-            "INVALID_TRASH_IDS",
-            "包含不存在、未删除或无权访问的图片"
+      return media.run(async () => {
+        const deletion = await store.update((draft) => {
+          const timestamp = now().toISOString();
+          const targets = draft.images.filter(
+            (image) =>
+              ids.has(image.id) &&
+              image.workspaceId === principal.workspaceId &&
+              Boolean(image.deletedAt)
           );
-        }
-        const candidateKeys = new Set<string>();
-        targets.forEach((image) => {
-          image.versions.forEach((version) => {
-            candidateKeys.add(version.originalKey);
-            candidateKeys.add(version.thumbnailKey);
-          });
-          candidateKeys.add(image.originalKey);
-          candidateKeys.add(image.thumbnailKey);
-        });
-        draft.images = draft.images.filter((image) => !ids.has(image.id));
-        draft.imageShares = draft.imageShares.filter(
-          (share) => !ids.has(share.imageId)
-        );
-        draft.albums.forEach((album) => {
-          if (
-            album.workspaceId === principal.workspaceId &&
-            album.coverImageId &&
-            ids.has(album.coverImageId)
-          ) {
-            delete album.coverImageId;
-            album.coverMode = "auto";
-            album.updatedAt = timestamp;
+          if (targets.length !== ids.size) {
+            throw new PublicError(
+              400,
+              "INVALID_TRASH_IDS",
+              "包含不存在、未删除或无权访问的图片"
+            );
           }
-        });
-        const retainedKeys = new Set<string>();
-        draft.images.forEach((image) => {
-          image.versions.forEach((version) => {
-            retainedKeys.add(version.originalKey);
-            retainedKeys.add(version.thumbnailKey);
+          draft.images = draft.images.filter((image) => !ids.has(image.id));
+          draft.imageShares = draft.imageShares.filter(
+            (share) => !ids.has(share.imageId)
+          );
+          draft.albums.forEach((album) => {
+            if (
+              album.workspaceId === principal.workspaceId &&
+              album.coverImageId &&
+              ids.has(album.coverImageId)
+            ) {
+              delete album.coverImageId;
+              album.coverMode = "auto";
+              album.updatedAt = timestamp;
+            }
           });
-          retainedKeys.add(image.originalKey);
-          retainedKeys.add(image.thumbnailKey);
+          const retained = new Set(draft.images.flatMap(mediaKeys));
+          media.queueDeletion(draft, targets.flatMap(mediaKeys).filter((key) => !retained.has(key)));
+          return targets.length;
         });
-        return {
-          deleted: targets.length,
-          keys: [...candidateKeys].filter((key) => !retainedKeys.has(key))
-        };
-      });
 
-      for (const key of deletion.keys) {
-        await objects.remove(key);
-      }
-      return { deleted: deletion.deleted };
+        const pendingFiles = await media.drainDeletes();
+        return pendingFiles ? { deleted: deletion, pendingFiles } : { deleted: deletion };
+      });
     }
   );
 }

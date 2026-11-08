@@ -1,5 +1,6 @@
 "use client";
 
+import { storageProviderLabels, type StorageProvider } from "@/lib/storage-provider";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Badge, Button, cn } from "@ou-image/ui";
 import {
@@ -54,7 +55,7 @@ import {
 import { AppShell } from "./app-shell";
 import styles from "./storage-console.module.css";
 
-type ProviderKey = "local" | "s3" | "r2";
+type ProviderKey = StorageProvider;
 type StorageTab = "providers" | "delivery" | "hotlink" | "migrations" | "backups";
 
 type RemoteProviderConfig = {
@@ -103,6 +104,7 @@ type ProviderHealth = {
 };
 
 type StorageHealth = {
+  pendingDeletes?: number;
   active: ProviderKey;
   providers:
     | Partial<Record<ProviderKey, ProviderHealth>>
@@ -191,20 +193,20 @@ const providerMeta: Record<
   { label: string; description: string; icon: LucideIcon; accent: string }
 > = {
   local: {
-    label: "本地存储",
+    label: storageProviderLabels.local,
     description: "直接写入服务器磁盘，部署简单、响应快速。",
     icon: HardDrive,
     accent: "#6d6d69"
   },
   s3: {
-    label: "Amazon S3",
-    description: "连接任意 S3 或兼容对象存储服务。",
+    label: storageProviderLabels.s3,
+    description: "直接写入 S3 或兼容存储桶。",
     icon: Cloud,
     accent: "#e3a34f"
   },
   r2: {
-    label: "Cloudflare R2",
-    description: "低出口成本，适合搭配自定义域名分发。",
+    label: storageProviderLabels.r2,
+    description: "直接写入 Cloudflare R2 存储桶。",
     icon: UploadCloud,
     accent: "#ef8f8f"
   }
@@ -751,7 +753,7 @@ export function StorageConsole() {
   const usagePercent = quotaBytes
     ? Math.min(100, Math.round((usageBytes / quotaBytes) * 100))
     : 0;
-  const actualActive = health?.active ?? "local";
+  const actualActive = settings.storage.active;
 
   const previewUrl = useMemo(() => {
     const domain =
@@ -780,20 +782,17 @@ export function StorageConsole() {
     }));
   };
 
-  const saveSettings = async (
-    scope: "storage" | "delivery" | "backup",
-    active: ProviderKey = settings.storage.active
-  ) => {
-    setBusy(`save-${scope}`);
+  const saveSettings = async (scope: "storage" | "delivery" | "backup", activate?: ProviderKey) => {
+    setBusy(activate ? "activate-storage" : `save-${scope}`);
     setNotice("");
     setError("");
     try {
       const storagePayload = {
-        active,
-        ...(hasRemoteConfiguration(settings.storage.s3, secrets.s3)
+        ...(activate ? { active: activate } : {}),
+        ...((!activate || activate === "s3") && hasRemoteConfiguration(settings.storage.s3, secrets.s3)
           ? { s3: remotePayload(settings.storage.s3, secrets.s3) }
           : {}),
-        ...(hasRemoteConfiguration(settings.storage.r2, secrets.r2)
+        ...((!activate || activate === "r2") && hasRemoteConfiguration(settings.storage.r2, secrets.r2)
           ? { r2: remotePayload(settings.storage.r2, secrets.r2) }
           : {})
       };
@@ -814,19 +813,17 @@ export function StorageConsole() {
       });
       setSettings(normalizeSettings(response));
       setSecrets({ s3: "", r2: "" });
+      if (activate) window.dispatchEvent(new Event("ou:uploads-updated"));
       setNotice(
-        scope === "storage"
-          ? active !== settings.storage.active
-            ? `已切换到${providerMeta[active].label}，新上传的图片将存放在这里`
-            : "存储提供商配置已保存"
+        activate ? `当前存储已切换为 ${providerMeta[activate].label}` : scope === "storage"
+          ? "存储提供商配置已保存"
           : scope === "delivery"
             ? "域名与访问策略已保存"
             : "备份计划已保存"
       );
-      const nextHealth = await apiRequest<StorageHealth>("/storage/health");
-      setHealth(nextHealth);
+      void apiRequest<StorageHealth>("/storage/health").then(setHealth).catch(() => undefined);
     } catch (requestError) {
-      setError(requestMessage(requestError, "配置保存失败"));
+      setError(requestMessage(requestError, activate ? "切换失败，当前存储未更改" : "配置保存失败"));
     } finally {
       setBusy("");
     }
@@ -1039,7 +1036,7 @@ export function StorageConsole() {
             <span className={styles.liveDot} />
             <div>
               <strong>{providerMeta[actualActive].label}</strong>
-              <small>当前存储运行中</small>
+              <small>当前写入位置</small>
             </div>
           </div>
         </header>
@@ -1055,6 +1052,9 @@ export function StorageConsole() {
           </StatusNotice>
         )}
 
+        {Boolean(health?.pendingDeletes) && (
+          <p role="status">有 {health?.pendingDeletes} 个文件等待清理，系统会自动重试。</p>
+        )}
         <section className={styles.metrics} aria-label="存储概览">
           <div className={styles.metricPrimary}>
             <div className={styles.metricIcon}>
@@ -1120,13 +1120,13 @@ export function StorageConsole() {
         {activeTab === "providers" && (
           <section className={styles.tabPanel}>
             <SectionTitle
-              description="选择图片写入位置，保存前可先验证连接状态。"
+              description="选择新图片和编辑版本的写入位置。切换前会测试读写，已有图片仍从原位置读取。"
               eyebrow="PROVIDERS"
               icon={Database}
               title="存储提供商"
               action={
                 <Button
-                  disabled={busy === "save-storage"}
+                  disabled={Boolean(busy)}
                   onClick={() => void saveSettings("storage")}
                   size="compact"
                 >
@@ -1148,6 +1148,8 @@ export function StorageConsole() {
                   tests[provider] ?? providerHealth(health, provider);
                 const selected = selectedProvider === provider;
                 const active = actualActive === provider;
+                const guide =
+                  provider === "local" ? null : getStorageProviderGuide(provider);
                 return (
                   <div
                     className={styles.providerCardShell}
@@ -1207,6 +1209,24 @@ export function StorageConsole() {
                         <HelpCircle aria-hidden="true" size={17} />
                       </button>
                     )}
+                    {guide && (
+                      <Button
+                        asChild
+                        className={styles.providerSetup}
+                        size="compact"
+                        variant="secondary"
+                      >
+                        <a
+                          aria-label={`${guide.setupLabel}（在新标签页打开）`}
+                          href={guide.setupUrl}
+                          rel="noopener noreferrer"
+                          target="_blank"
+                        >
+                          {guide.setupLabel}
+                          <ExternalLink aria-hidden="true" size={14} />
+                        </a>
+                      </Button>
+                    )}
                   </div>
                 );
               })}
@@ -1220,7 +1240,7 @@ export function StorageConsole() {
                 </div>
                 <div className={styles.configActions}>
                   <Button
-                    disabled={busy === `test-${selectedProvider}`}
+                    disabled={Boolean(busy)}
                     onClick={() => void testProvider(selectedProvider)}
                     size="compact"
                     variant="secondary"
@@ -1234,17 +1254,11 @@ export function StorageConsole() {
                   </Button>
                   {selectedProvider !== actualActive && (
                     <Button
-                      disabled={busy === "save-storage"}
-                      onClick={() =>
-                        void saveSettings("storage", selectedProvider)
-                      }
+                      disabled={Boolean(busy)}
+                      onClick={() => void saveSettings("storage", selectedProvider)}
                       size="compact"
                     >
-                      {busy === "save-storage" ? (
-                        <LoaderCircle className={styles.spin} size={15} />
-                      ) : (
-                        <ShieldCheck aria-hidden="true" size={15} />
-                      )}
+                      {busy === "activate-storage" ? <LoaderCircle className={styles.spin} size={15} /> : <Check aria-hidden="true" size={15} />}
                       设为当前存储
                     </Button>
                   )}
@@ -1651,8 +1665,7 @@ export function StorageConsole() {
                 <small>校验后复制</small>
               </div>
               <p>
-                迁移期间上传不受影响，新图片继续写入当前存储：
-                {providerMeta[actualActive].label}。
+                手动复制已有本地文件。新上传继续写入当前存储。
               </p>
             </div>
             <div className={styles.listCard}>
@@ -1750,7 +1763,7 @@ export function StorageConsole() {
         {activeTab === "backups" && (
           <section className={styles.tabPanel}>
             <SectionTitle
-              description="创建可下载的完整备份，并设置自动保留策略。"
+              description="备份本地图片与配置，并设置保留策略。应用内备份最多容纳 128 MiB 文件；较大的图库请由管理员创建数据卷快照。"
               eyebrow="BACKUP & RESTORE"
               icon={FileArchive}
               title="备份与恢复"
@@ -2052,7 +2065,7 @@ function RemoteProviderFields({
           placeholder={
             provider === "r2"
               ? "https://<account-id>.r2.cloudflarestorage.com"
-              : "https://s3.amazonaws.com"
+              : "https://s3.ap-southeast-1.amazonaws.com"
           }
           value={config.endpoint}
         />

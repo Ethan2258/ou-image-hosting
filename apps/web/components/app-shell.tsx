@@ -1,5 +1,6 @@
 "use client";
 
+import { storageProviderLabels, type StorageProvider } from "@/lib/storage-provider";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Tooltip from "@radix-ui/react-tooltip";
@@ -78,10 +79,6 @@ import {
   writeStoredSiteBranding,
   type SiteBranding
 } from "@/lib/site-branding";
-import {
-  storageRunningLabel,
-  type StorageProviderKey
-} from "@/lib/storage-provider";
 
 const iconMap: Record<string, LucideIcon> = {
   overview: Activity,
@@ -96,6 +93,7 @@ const iconMap: Record<string, LucideIcon> = {
   team: Users,
   users: Users,
   tokens: KeyRound,
+  nodeseek: ImageUp,
   audit: Activity,
   system: ServerCog,
   settings: Settings
@@ -347,6 +345,9 @@ export function AppShell({
   const [online, setOnline] = useState(true);
   const [accessChecked, setAccessChecked] = useState(hasCachedShell);
   const [query, setQuery] = useState("");
+  const [contentResults, setContentResults] = useState<Array<{ id: string; name: string; href: string; kind: string; thumbnailUrl?: string }>>([]);
+  const [contentSearching, setContentSearching] = useState(false);
+  const [contentSearchError, setContentSearchError] = useState(false);
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(
     cachedSession?.user ?? null
   );
@@ -360,7 +361,7 @@ export function AppShell({
   const [storageSummary, setStorageSummary] = useState<{
     bytes: number;
     quotaBytes: number;
-    storageProvider?: StorageProviderKey;
+    activeStorage?: StorageProvider;
   } | null>(null);
 
   const loadNotifications = useCallback(async () => {
@@ -377,6 +378,43 @@ export function AppShell({
     } finally {
       setNotificationLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    if (!commandOpen || !query.trim()) {
+      setContentResults([]); setContentSearching(false); setContentSearchError(false);
+      return;
+    }
+    const controller = new AbortController();
+    setContentSearching(true);
+    setContentResults([]);
+    setContentSearchError(false);
+    const timer = window.setTimeout(async () => {
+      const keyword = query.trim().toLocaleLowerCase();
+      const results = await Promise.allSettled([
+        apiRequest<{ images: Array<{ id: string; name: string; thumbnailUrl: string }> }>(`/uploads?q=${encodeURIComponent(query.trim())}&limit=5`, { signal: controller.signal }),
+        apiRequest<{ albums: Array<{ id: string; name: string }> }>("/albums", { signal: controller.signal }),
+        apiRequest<{ tags: Array<{ id: string; name: string }> }>("/tags", { signal: controller.signal })
+      ]);
+      if (controller.signal.aborted) return;
+      const images = results[0].status === "fulfilled" ? results[0].value.images : [];
+      const albums = results[1].status === "fulfilled" ? results[1].value.albums : [];
+      const tags = results[2].status === "fulfilled" ? results[2].value.tags : [];
+      setContentResults([
+        ...images.map((item) => ({ ...item, kind: "图片", href: `/library/${item.id}` })),
+        ...albums.filter((item) => item.name.toLocaleLowerCase().includes(keyword)).slice(0, 4).map((item) => ({ ...item, kind: "相册", href: `/albums/${item.id}` })),
+        ...tags.filter((item) => item.name.toLocaleLowerCase().includes(keyword)).slice(0, 4).map((item) => ({ ...item, kind: "标签", href: `/tags?tag=${encodeURIComponent(item.id)}` }))
+      ]);
+      setContentSearchError(results.some((item) => item.status === "rejected"));
+      setContentSearching(false);
+    }, 240);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [commandOpen, query]);
+
+  useEffect(() => {
+    const refreshStorage = () => { void apiRequest<{ bytes: number; quotaBytes: number; activeStorage?: StorageProvider }>("/uploads/summary").then(setStorageSummary).catch(() => undefined); };
+    window.addEventListener("ou:uploads-updated", refreshStorage);
+    return () => window.removeEventListener("ou:uploads-updated", refreshStorage);
   }, []);
 
   const changeNotificationsOpen = (open: boolean) => {
@@ -449,6 +487,7 @@ export function AppShell({
         const bootstrap = normalizeSessionBootstrap(payload);
         if (!bootstrap.backoffice.allowed) {
           clearShellSessionSnapshot();
+          window.dispatchEvent(new Event("ou:session-ended"));
           router.replace("/?backoffice=denied");
           return;
         }
@@ -468,16 +507,15 @@ export function AppShell({
         setCurrentWorkspace(selected);
         setAccessChecked(true);
         writeShellSessionSnapshot(bootstrap, selected.id);
-        void apiRequest<{
-          bytes: number;
-          quotaBytes: number;
-          storageProvider?: StorageProviderKey;
-        }>("/uploads/summary")
+        void apiRequest<{ bytes: number; quotaBytes: number; activeStorage?: StorageProvider }>(
+          "/uploads/summary"
+        )
           .then(setStorageSummary)
           .catch(() => setStorageSummary(null));
       })
       .catch(() => {
         clearShellSessionSnapshot();
+        window.dispatchEvent(new Event("ou:session-ended"));
         router.replace("/login");
       });
   }, [router]);
@@ -597,9 +635,7 @@ export function AppShell({
                 }}
               />
             </div>
-            <Link href="/storage">
-              {storageRunningLabel(storageSummary?.storageProvider)}
-            </Link>
+            <Link href="/storage">{storageSummary?.activeStorage ? `${storageProviderLabels[storageSummary.activeStorage]} · 当前存储` : "存储中心"}</Link>
             </div>
           )}
         </aside>
@@ -803,13 +839,11 @@ export function AppShell({
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
-                  aria-label={`打开用户菜单 ${(sessionUser?.displayName ?? "OU")
-                    .slice(0, 2)
-                    .toUpperCase()}`}
+                  aria-label={`打开用户菜单：${(sessionUser?.displayName ?? "OU").slice(0, 2).toUpperCase()}`}
                   className="user-trigger"
                   type="button"
                 >
-                  <span>
+                  <span aria-hidden="true">
                     {(sessionUser?.displayName ?? "OU")
                       .slice(0, 2)
                       .toUpperCase()}
@@ -845,6 +879,7 @@ export function AppShell({
                     onSelect={(event) => {
                       event.preventDefault();
                       clearShellSessionSnapshot();
+                      window.dispatchEvent(new Event("ou:session-ended"));
                       apiRequest("/auth/logout", { method: "POST" }).finally(() => {
                         router.replace("/login");
                         router.refresh();
@@ -927,15 +962,18 @@ export function AppShell({
             >
               <Dialog.Title className="sr-only">命令面板</Dialog.Title>
               <Dialog.Description className="sr-only" id="command-description">
-                搜索并打开工作区页面。
+                搜索图片、相册、标签，或快速打开工作区页面。
               </Dialog.Description>
               <div className="command-dialog__search">
                 <Search aria-hidden="true" size={19} />
                 <input
                   aria-label="搜索页面"
                   autoFocus
+                  maxLength={120}
+                  autoComplete="off"
+                  name="global-search"
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="输入页面名称或操作"
+                  placeholder="搜索图片、相册、标签或页面…"
                   value={query}
                 />
                 <kbd>Esc</kbd>
@@ -955,8 +993,12 @@ export function AppShell({
                     </Dialog.Close>
                   );
                 })}
-                {filteredItems.length === 0 && (
-                  <div className="command-empty">没有找到匹配页面。</div>
+                {contentResults.length > 0 && <div className="command-result-label">内容结果</div>}
+                {contentResults.map((item) => <Dialog.Close asChild key={`${item.kind}-${item.id}`}><Link className="command-item command-content-item" href={item.href}><span className="command-item__icon">{item.thumbnailUrl ? <img alt="" src={item.thumbnailUrl} width={36} height={36} /> : item.kind === "相册" ? <Album aria-hidden="true" size={18} /> : <Tags aria-hidden="true" size={18} />}</span><span>{item.name}<small>{item.kind}</small></span></Link></Dialog.Close>)}
+                {contentSearching && <div className="command-empty" role="status">正在查找内容…</div>}
+                {contentSearchError && <div className="command-empty" role="status">部分内容暂时无法读取，请重试。</div>}
+                {filteredItems.length === 0 && contentResults.length === 0 && !contentSearching && (
+                  <div className="command-empty">没有找到匹配的内容或页面。</div>
                 )}
               </div>
             </Dialog.Content>
