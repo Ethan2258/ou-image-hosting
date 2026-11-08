@@ -14,6 +14,7 @@ on:
       - .dockerignore
       - .npmrc
       - Caddyfile
+      - compose.tunnel.yml
       - Dockerfile
       - docker-compose.yml
       - install.sh
@@ -33,7 +34,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Released images run on Node 24 LTS instead of the upstream Dockerfile's Node 20 default.
+  # Keep in step with docker-compose.yml (OU_NODE_VERSION default) and the Dockerfile.
   NODE_VERSION: 24.22.1
 
 jobs:

@@ -178,6 +178,8 @@ export function OrganizationHub({
         setSelectedResourceId((current) =>
           payload.tags.some((tag) => tag.id === current)
             ? current
+            : payload.tags.some((tag) => tag.id === initialResourceId)
+              ? initialResourceId
             : (payload.tags[0]?.id ?? "")
         );
       }
@@ -476,6 +478,7 @@ export function OrganizationHub({
       const payload = await apiRequest<{
         restored?: number;
         deleted?: number;
+        pendingFiles?: number;
         updated?: number;
       }>("/trash/bulk", {
           method: "POST",
@@ -496,7 +499,9 @@ export function OrganizationHub({
       setNotice(
         action === "restore"
           ? `已恢复 ${affected} 张图片。`
-          : `已永久删除 ${affected} 张图片及其全部版本。`
+          : payload.pendingFiles
+            ? `已移除 ${affected} 张图片。仍有 ${payload.pendingFiles} 个文件等待清理，系统会自动重试。`
+            : `已永久删除 ${affected} 张图片及其全部版本。`
       );
     } catch (requestError) {
       setNotice(requestMessage(requestError, "回收站操作失败"));

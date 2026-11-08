@@ -309,6 +309,10 @@
   min-width: 0;
 }
 
+.providerSetup {
+  margin: 8px 0 0 14px;
+}
+
 .providerCard {
   position: relative;
   display: grid;
@@ -1933,4 +1937,10 @@
   .guideStep {
     animation: none;
   }
+}
+
+.configActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }

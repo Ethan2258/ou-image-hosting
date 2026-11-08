@@ -1,8 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import {
-  access,
-  constants,
   mkdir,
   rename,
   unlink,
@@ -18,8 +16,8 @@ import {
   requireSession,
   type Principal
 } from "./access.js";
+import { storageLabels, type MediaStorage } from "./media-storage.js";
 import { PublicError } from "./errors.js";
-import { runtimeRemote, signedS3Request } from "./infrastructure.js";
 import { requireBackofficeAccess } from "./site-access.js";
 import {
   calculateImageStorageBytes,
@@ -28,14 +26,15 @@ import {
   defaultWorkspaceSettings,
   type AppState,
   type AppStore,
+  type StorageProvider,
   type StoredBackup,
   type StoredStorageMigration,
-  type StorageProvider,
   type StoredSystemStatusResult,
   type WorkspaceSettings
 } from "./store.js";
 
 type Options = {
+  media: MediaStorage;
   store: AppStore;
   dataDirectory: string;
   appOrigin: string;
@@ -255,34 +254,16 @@ function statusEvents(history: StoredSystemStatusResult[]) {
   }));
 }
 
-const storageServiceMeta = {
-  local: { label: "本地存储", mode: "filesystem" },
-  s3: { label: "Amazon S3", mode: "s3-compatible" },
-  r2: { label: "Cloudflare R2", mode: "s3-compatible" }
-} as const;
-
-// A check recorded before the active storage changed describes the old
-// provider, so it is shown as pending instead of reusing its label.
-function withActiveStorage(
-  services: StoredSystemStatusResult["services"],
-  active: StorageProvider
-) {
-  const expected = storageServiceMeta[active];
-  return services.map((service) =>
-    service.id === "local-storage" && service.label !== expected.label
-      ? {
-          ...service,
-          ...expected,
-          status: "unknown" as const,
-          checked: false,
-          detail: "存储方式已切换，等待重新检查",
-          latencyMs: 0
-        }
-      : service
-  );
+function storageService(provider: StorageProvider) {
+  return {
+    id: provider === "local" ? "local-storage" : `${provider}-storage`,
+    label: storageLabels[provider],
+    mode: provider === "local" ? "filesystem" : "s3-compatible",
+    inUse: true
+  };
 }
 
-function baselineServices(): StoredSystemStatusResult["services"] {
+function baselineServices(provider: StorageProvider): StoredSystemStatusResult["services"] {
   return [
     {
       id: "metadata-store",
@@ -295,11 +276,8 @@ function baselineServices(): StoredSystemStatusResult["services"] {
       latencyMs: 0
     },
     {
-      id: "local-storage",
-      label: "本地存储",
+      ...storageService(provider),
       status: "unknown",
-      mode: "filesystem",
-      inUse: true,
       checked: false,
       detail: "尚未执行检查",
       latencyMs: 0
@@ -365,23 +343,21 @@ function baselineServices(): StoredSystemStatusResult["services"] {
   ];
 }
 
-function publicStatus(
-  history: StoredSystemStatusResult[],
-  active: StorageProvider
-) {
-  const latest = history[0];
+function publicStatus(history: StoredSystemStatusResult[], provider: StorageProvider) {
+  const storageId = storageService(provider).id;
+  const latest = history.find((result) => result.services.some((service) => service.id === storageId));
   if (!latest) {
     return {
       checkedAt: null,
       overall: "unknown" as const,
-      services: withActiveStorage(baselineServices(), active),
-      events: []
+      services: baselineServices(provider),
+      events: statusEvents(history)
     };
   }
   return {
     checkedAt: latest.checkedAt,
     overall: latest.overall,
-    services: withActiveStorage(latest.services, active),
+    services: latest.services,
     events: statusEvents(history)
   };
 }
@@ -419,11 +395,12 @@ async function timedService(
 async function performSystemCheck(
   store: AppStore,
   dataDirectory: string,
+  media: MediaStorage,
   timestamp: Date
 ): Promise<StoredSystemStatusResult> {
   const started = Date.now();
-  const storageRoot = path.join(dataDirectory, "storage");
-  const activeStorage = store.snapshot().storageSettings.active;
+  const snapshot = store.snapshot();
+  const provider = snapshot.storageSettings.active;
   const core = await Promise.all([
     timedService(
       {
@@ -460,32 +437,10 @@ async function performSystemCheck(
         }
       }
     ),
-    activeStorage === "local"
-      ? timedService(
-          {
-            id: "local-storage",
-            label: "本地存储",
-            mode: "filesystem",
-            inUse: true
-          },
-          async () => {
-            await mkdir(storageRoot, { recursive: true });
-            await access(storageRoot, constants.R_OK | constants.W_OK);
-            return "可读取且可写入";
-          }
-        )
-      : timedService(
-          {
-            id: "local-storage",
-            ...storageServiceMeta[activeStorage],
-            inUse: true
-          },
-          async () => {
-            const config = runtimeRemote(store.snapshot(), activeStorage);
-            await signedS3Request(config, "HEAD", timestamp);
-            return `存储桶 ${config.bucket} 可访问`;
-          }
-        ),
+    timedService(storageService(provider), async () => {
+      await media.probe(snapshot, provider);
+      return provider === "local" ? "可读取且可写入" : "当前存储桶可访问";
+    }),
     timedService(
       {
         id: "image-processing",
@@ -611,7 +566,7 @@ export function registerOperationsRoutes(
   app: FastifyInstance,
   options: Options
 ) {
-  const { store, dataDirectory, appOrigin, now, authenticate } = options;
+  const { store, media, dataDirectory, appOrigin, now, authenticate } = options;
   let statusCheckInFlight = false;
   let jobRetryInFlight = false;
 
@@ -793,6 +748,7 @@ export function registerOperationsRoutes(
         const result = await performSystemCheck(
           store,
           dataDirectory,
+          media,
           timestamp
         );
         await store.update((state) => {
