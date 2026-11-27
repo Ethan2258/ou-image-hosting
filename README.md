@@ -19,7 +19,7 @@
 
 > [!NOTE]
 > 本仓库是 [cshaizhihao/ou-image-hosting](https://github.com/cshaizhihao/ou-image-hosting) 的分支版本，已包含上游 V2.0.1。
-> 分支额外的改动：依赖保持最新安全版本（Next.js 16、Vitest 4 等），服务器构建使用 Node.js 24 LTS 和 Caddy 2.11.4，
+> 分支额外的改动：依赖保持最新安全版本（Next.js 16、Vitest 4 等），服务器构建使用 Node.js 24 LTS 和 Caddy 2.11.9，
 > 旧版分支写进 S3 / R2 的图片升级后照常读取。每 6 小时自动同步一次上游，代码变更后自动发布 Release 与 Docker 镜像。
 
 ## 快速安装
