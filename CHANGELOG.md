@@ -7,8 +7,8 @@
 ### 本 fork
 
 - 合并上游 V2.0.1。上游已自带“切换本地 / S3 / R2 存储”，本 fork 原来的同类实现改用上游版本；本 fork 旧版写进 S3 / R2 的图片（键名没有 `s3/`、`r2/` 前缀）在本地找不到时，仍会回退到已配置的存储桶读取和删除，升级后不用搬迁。
-- 依赖保持 fork 的安全版本：Next.js 16.4.2、Vitest 4.1.12、Vite 7.3.7，以及 postcss、nanoid、fast-uri、find-my-way、sharp、@fastify/busboy、source-map-js 的 pnpm overrides；`pnpm audit --prod` 无已知漏洞。
-- 服务器本地构建（`install.sh` / `ouih update`）和 Release 镜像使用 Node.js 24.22.1，可用 `.env.production` 的 `OU_NODE_VERSION` 覆盖；Caddy 2.11.4。
+- 依赖保持 fork 的安全版本：Next.js 16.4.6、Vitest 4.1.12、Vite 7.3.7，以及 postcss、nanoid、fast-uri、find-my-way、sharp、@fastify/busboy、source-map-js 的 pnpm overrides；`pnpm audit --prod` 无已知漏洞。
+- 服务器本地构建（`install.sh` / `ouih update`）和 Release 镜像使用 Node.js 24.22.3，可用 `.env.production` 的 `OU_NODE_VERSION` 覆盖；Caddy 2.11.9。
 - 自动同步上游（每 6 小时）遇到冲突时改为开一个 issue 列出冲突文件（以前尝试从上游开 PR，被 GitHub 拒绝，只留下失败的运行记录）。
 - 自动发布 Release 与 GHCR 镜像的工作流。
 

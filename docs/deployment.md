@@ -78,7 +78,7 @@ COMPOSE_PARALLEL_LIMIT=1 docker compose --env-file .env.production build api
 COMPOSE_PARALLEL_LIMIT=1 docker compose --env-file .env.production build web
 ```
 
-Local builds and the images published by this fork pin Node.js 24.22.1
+Local builds and the images published by this fork pin Node.js 24.22.3
 (set in `docker-compose.yml` and the release workflow) and pnpm 9.15.9,
 install with the frozen lockfile, and run as the unprivileged `node` user.
 To build on another Node version, set `OU_NODE_VERSION` in

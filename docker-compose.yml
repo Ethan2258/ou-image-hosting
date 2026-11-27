@@ -23,7 +23,7 @@ services:
       target: api
       args:
         # Node 20 reached end of life; builds on this fork follow Node 24 LTS.
-        NODE_VERSION: ${OU_NODE_VERSION:-24.22.1}
+        NODE_VERSION: ${OU_NODE_VERSION:-24.22.3}
     image: ou-image-hosting-api:${OU_IMAGE_TAG:-local}
     env_file:
       - ${OU_ENV_FILE:-.env.production}
@@ -68,7 +68,7 @@ services:
       target: web
       args:
         # Node 20 reached end of life; builds on this fork follow Node 24 LTS.
-        NODE_VERSION: ${OU_NODE_VERSION:-24.22.1}
+        NODE_VERSION: ${OU_NODE_VERSION:-24.22.3}
     image: ou-image-hosting-web:${OU_IMAGE_TAG:-local}
     env_file:
       - ${OU_ENV_FILE:-.env.production}
@@ -108,7 +108,7 @@ services:
     <<: *runtime-defaults
     profiles:
       - https
-    image: caddy:2.11.4-alpine
+    image: caddy:2.11.9-alpine
     env_file:
       - ${OU_ENV_FILE:-.env.production}
     depends_on:

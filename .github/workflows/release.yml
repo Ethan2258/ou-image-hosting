@@ -34,8 +34,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Keep in step with docker-compose.yml (OU_NODE_VERSION default) and the Dockerfile.
-  NODE_VERSION: 24.22.1
+  # Keep in step with docker-compose.yml (OU_NODE_VERSION default). The Dockerfile's
+  # own default belongs to upstream; both builds pass this version over it.
+  NODE_VERSION: 24.22.3
 
 jobs:
   verify:
